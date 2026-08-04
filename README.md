@@ -41,6 +41,19 @@ print(f"Time: {time.time() - start:.4f} seconds")
 ## PyInstaller Compatibility
 FastFS is built with `maturin`. It compiles to a `.pyd` module, which PyInstaller's dependency analyzer automatically discovers and bundles. There is no need for `sys._MEIPASS` extractions or custom `datas` hooks!
 
+## FastFS vs. Voidtools "Everything"
+
+If you've researched fast file search on Windows, you might wonder why we didn't just use the Voidtools "Everything" SDK. 
+
+**Use Voidtools Everything when:**
+- You are building a system-wide search utility where you can guarantee the user has **Administrator Privileges**.
+- You want the absolute maximum speed physically possible (Everything reads the raw NTFS Master File Table / USN Journal at the disk-sector level).
+
+**Use FastFS when:**
+- You are distributing a portable Python application (like a PyInstaller `.exe`) to everyday users and **cannot ask for UAC Administrator privileges**.
+- You want zero background services. FastFS runs entirely in user-space inside your Python process.
+- You need to index **Network Drives** (SMB). Everything relies on the local NTFS MFT and struggles with network shares, while FastFS gracefully sweeps network drives using standard Windows APIs.
+
 ## Building from Source
 
 ```bash
