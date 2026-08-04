@@ -140,8 +140,8 @@ fn traverse(
 }
 
 #[pyfunction]
-#[pyo3(signature = (db_path, root=None))]
-fn run_scan(db_path: &str, root: Option<String>) -> PyResult<()> {
+#[pyo3(signature = (db_path, root=None, background=None))]
+fn run_scan(db_path: &str, root: Option<String>, background: Option<bool>) -> PyResult<()> {
     let (tx, rx) = bounded::<Vec<Node>>(10_000);
     
     // Convert str to String so it can be moved to thread
@@ -163,9 +163,32 @@ fn run_scan(db_path: &str, root: Option<String>) -> PyResult<()> {
     });
 
     let next_id = Arc::new(AtomicUsize::new(1));
-    // It's safe to call build_global multiple times in PyO3 if it's already built. 
-    // Just ignore the error.
-    let _ = rayon::ThreadPoolBuilder::new().num_threads(64).build_global();
+    let bg = background.unwrap_or(false);
+    
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(if bg { 4 } else { 64 })
+        .start_handler(move |_| {
+            if bg {
+                #[cfg(target_os = "windows")]
+                {
+                    unsafe {
+                        windows_sys::Win32::System::Threading::SetThreadPriority(
+                            windows_sys::Win32::System::Threading::GetCurrentThread(),
+                            windows_sys::Win32::System::Threading::THREAD_MODE_BACKGROUND_BEGIN
+                        );
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    unsafe {
+                        libc::setpriority(libc::PRIO_PROCESS, 0, 19);
+                        libc::syscall(libc::SYS_ioprio_set, 1, 0, 3 << 13);
+                    }
+                }
+            }
+        })
+        .build()
+        .unwrap();
 
     let drives = match root {
         Some(r) => vec![r],
@@ -173,23 +196,25 @@ fn run_scan(db_path: &str, root: Option<String>) -> PyResult<()> {
     };
     let mut root_nodes = Vec::new();
 
-    for drive in drives {
-        let tx_clone = tx.clone();
-        let next_id_clone = next_id.clone();
-        let root_path = std::path::PathBuf::from(&drive);
-
-        let id = next_id.fetch_add(1, Ordering::Relaxed);
-        let root_hash = traverse(root_path, id, tx_clone, next_id_clone);
-
-        root_nodes.push(Node {
-            id,
-            parent_id: None,
-            name: drive,
-            is_dir: true,
-            node_hash: root_hash as i64,
-            last_modified: 0,
-        });
-    }
+    pool.install(|| {
+        for drive in drives {
+            let tx_clone = tx.clone();
+            let next_id_clone = next_id.clone();
+            let root_path = std::path::PathBuf::from(&drive);
+    
+            let id = next_id.fetch_add(1, Ordering::Relaxed);
+            let root_hash = traverse(root_path, id, tx_clone, next_id_clone);
+    
+            root_nodes.push(Node {
+                id,
+                parent_id: None,
+                name: drive,
+                is_dir: true,
+                node_hash: root_hash as i64,
+                last_modified: 0,
+            });
+        }
+    });
 
     if !root_nodes.is_empty() {
         tx.send(root_nodes).unwrap();
