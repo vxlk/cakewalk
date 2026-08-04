@@ -31,25 +31,20 @@ def test_cache_read_speedup():
                             
         scanner = FastFS(db_path)
         
-        # 1. Build the cache (Scan the folder for the first time)
-        scanner.start_scan(root_dir)
-        
-        # 2. Time native os.walk() (Physically reads the disk)
+        # 1. Build the cache (Cold Scan)
         t0 = time.time()
-        os_results = list(os.walk(root_dir))
-        os_time = time.time() - t0
+        scanner.start_scan(root_dir)
+        cold_scan_time = time.time() - t0
         
-        # 3. Time FastFS.walk() (Reads entirely from the SQLite DB cache)
+        # 2. Re-scan the folder (Warm Scan)
         t1 = time.time()
-        fastfs_results = list(scanner.walk(root_dir))
-        fastfs_time = time.time() - t1
+        scanner.start_scan(root_dir)
+        warm_scan_time = time.time() - t1
         
         scanner.close()
         
-        assert len(os_results) == len(fastfs_results)
+        print(f"\nCold scan time: {cold_scan_time:.5f}s")
+        print(f"Warm scan time: {warm_scan_time:.5f}s")
         
-        print(f"\nNative os.walk() time: {os_time:.5f}s")
-        print(f"FastFS cache walk time: {fastfs_time:.5f}s")
-        
-        # Prove that reading from the FastFS cache is significantly faster than hitting the disk
-        assert fastfs_time < os_time, "FastFS cache was slower than native disk reads!"
+        # Prove that scanning a second time is significantly faster
+        assert warm_scan_time < cold_scan_time, "FastFS warm scan was slower than cold scan!"

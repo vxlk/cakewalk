@@ -1,5 +1,6 @@
 import sqlite3
 import os
+from typing import Generator, Tuple, List, Optional
 
 try:
     from fastfs._fastfs import run_scan
@@ -11,13 +12,13 @@ class FastFS:
         self.db_location = db_location
         self.conn = None
 
-    def start_scan(self, root: str = None, background: bool = False):
+    def start_scan(self, root: Optional[str] = None, background: bool = False):
         if root:
             if len(root) == 2 and root[1] == ':':
                 root += '\\'
             elif len(root) > 2 and root[1] == ':' and root[-1] == '\\' and root[-2] == '\\':
                 root = root.rstrip('\\') + '\\'
-        run_scan(self.db_location, root, background)
+        run_scan(self.db_location, root, background=background)
 
     def _get_conn(self):
         if self.conn is None:
