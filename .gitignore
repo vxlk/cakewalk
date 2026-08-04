@@ -1,0 +1,6 @@
+/target/
+*.db
+__pycache__/
+*.whl
+.env
+.venv
