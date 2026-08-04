@@ -140,7 +140,8 @@ fn traverse(
 }
 
 #[pyfunction]
-fn run_scan(db_path: &str) -> PyResult<()> {
+#[pyo3(signature = (db_path, root=None))]
+fn run_scan(db_path: &str, root: Option<String>) -> PyResult<()> {
     let (tx, rx) = bounded::<Vec<Node>>(10_000);
     
     // Convert str to String so it can be moved to thread
@@ -166,7 +167,10 @@ fn run_scan(db_path: &str) -> PyResult<()> {
     // Just ignore the error.
     let _ = rayon::ThreadPoolBuilder::new().num_threads(64).build_global();
 
-    let drives = get_drives();
+    let drives = match root {
+        Some(r) => vec![r],
+        None => get_drives(),
+    };
     let mut root_nodes = Vec::new();
 
     for drive in drives {

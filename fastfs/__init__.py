@@ -2,10 +2,8 @@ import sqlite3
 import os
 
 try:
-    # Try importing the compiled Rust extension
     from fastfs._fastfs import run_scan
 except ImportError:
-    # Fallback if installed via Maturin directly into site-packages
     from _fastfs import run_scan
 
 class FastFS:
@@ -13,72 +11,72 @@ class FastFS:
         self.db_location = db_location
         self.conn = None
 
-    def start_scan(self):
-        """
-        Triggers the Rust scanner to detect all drives, calculate Merkle hashes,
-        and build the SQLite adjacency list at self.db_location.
-        """
-        run_scan(self.db_location)
+    def start_scan(self, root: str = None):
+        if root:
+            if len(root) == 2 and root[1] == ':':
+                root += '\\'
+            elif len(root) > 2 and root[1] == ':' and root[-1] == '\\' and root[-2] == '\\':
+                root = root.rstrip('\\') + '\\'
+        run_scan(self.db_location, root)
 
     def _get_conn(self):
         if self.conn is None:
             if not os.path.exists(self.db_location):
                 raise FileNotFoundError(f"Database not found at {self.db_location}. Call start_scan() first.")
             self.conn = sqlite3.connect(self.db_location)
-            # Optimize read performance
             self.conn.execute("PRAGMA journal_mode = WAL;")
             self.conn.execute("PRAGMA synchronous = NORMAL;")
-            self.conn.execute("PRAGMA cache_size = -64000;") # 64MB cache
+            self.conn.execute("PRAGMA cache_size = -64000;")
         return self.conn
 
     def walk(self, top: str):
-        """
-        Mimics os.walk() but reads entirely from the SQLite database.
-        Yields (dirpath, dirnames, filenames).
-        """
         conn = self._get_conn()
-        
-        # We need to find the top folder's ID first.
-        # SQLite recursive CTE to resolve paths is possible, but resolving the top path 
-        # iteratively down from the root is easy.
-        
-        parts = top.split(os.sep)
-        if not parts:
-            return
-            
-        # Standardize the drive letter (e.g. C: -> C:\)
-        if len(parts[0]) == 2 and parts[0][1] == ':':
-            parts[0] = parts[0] + '\\'
-            
-        # Find the root drive node
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM fs_nodes WHERE name = ? AND parent_id IS NULL", (parts[0],))
+        
+        # 1. Try exact match for root node
+        cursor.execute("SELECT id FROM fs_nodes WHERE name = ? AND parent_id IS NULL", (top,))
         row = cursor.fetchone()
         
-        if not row:
-            return # Top path not found in DB
-            
-        current_id = row[0]
+        print("DEBUG exact match:", top, "->", row)
         
-        # Traverse down to the target folder
-        for part in parts[1:]:
-            if not part: # Handle trailing slashes
-                continue
-            cursor.execute("SELECT id FROM fs_nodes WHERE name = ? AND parent_id = ? AND is_dir = 1", (part, current_id))
-            row = cursor.fetchone()
-            if not row:
-                return # Path doesn't exist in DB
+        if row:
             current_id = row[0]
+        else:
+            # 2. Try prefix match
+            cursor.execute("SELECT id, name FROM fs_nodes WHERE parent_id IS NULL")
+            roots = cursor.fetchall()
+            print("DEBUG all roots:", roots)
             
-        # Now we have the starting ID, we can do an iterative breadth-first search to yield results.
-        # We use a stack to manage traversal, similar to os.walk top-down.
-        
+            matching_root = None
+            # Find the longest matching root
+            roots.sort(key=lambda x: len(x[1]), reverse=True)
+            for r_id, r_name in roots:
+                if top == r_name or top.startswith(r_name.rstrip(os.sep) + os.sep):
+                    matching_root = (r_id, r_name)
+                    break
+                    
+            if not matching_root:
+                return
+                
+            current_id, r_name = matching_root
+            
+            if top != r_name:
+                r_name_norm = r_name.rstrip(os.sep) + os.sep
+                remainder = top[len(r_name_norm):]
+                if remainder:
+                    for part in remainder.split(os.sep):
+                        if not part: continue
+                        cursor.execute("SELECT id FROM fs_nodes WHERE name = ? AND parent_id = ? AND is_dir = 1", (part, current_id))
+                        row = cursor.fetchone()
+                        if not row:
+                            return
+                        current_id = row[0]
+                        
         stack = [(top, current_id)]
         
         while stack:
             current_path, node_id = stack.pop()
             
-            # Fetch all children of this node
             cursor.execute("SELECT name, is_dir FROM fs_nodes WHERE parent_id = ?", (node_id,))
             children = cursor.fetchall()
             
@@ -93,7 +91,6 @@ class FastFS:
                     
             yield current_path, dirnames, filenames
             
-            # Push directories onto the stack (in reverse so they are processed in order)
             for dirname in reversed(dirnames):
                 child_path = os.path.join(current_path, dirname)
                 cursor.execute("SELECT id FROM fs_nodes WHERE parent_id = ? AND name = ? AND is_dir = 1", (node_id, dirname))

@@ -27,6 +27,9 @@ scanner = FastFS("multi_drive_cache.db")
 # This will take ~10-20 seconds the first time, and < 5 seconds on subsequent runs
 scanner.start_scan() 
 
+# You can also target a specific directory for near-instant scanning:
+# scanner.start_scan("C:\\Windows\\System32")
+
 # 2. Reconstruct any folder tree instantly
 start = time.time()
 for root, dirs, files in scanner.walk("C:\\Windows\\System32"):
