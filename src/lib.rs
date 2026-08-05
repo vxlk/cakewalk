@@ -80,14 +80,17 @@ fn traverse(
                     Err(os_str) => os_str.to_string_lossy().into_owned(),
                 };
                 
-                let modified = meta.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
                 let size = meta.len();
 
                 if is_dir {
+                    // Truncate directory mtime to seconds to avoid NTFS lazy flush invalidation storms
+                    let dir_modified = meta.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
                     let cached_id = cache_map.get(&(this_dir_id, name.clone())).map(|c| c.0);
                     let id = cached_id.unwrap_or_else(|| next_id.fetch_add(1, Ordering::Relaxed));
-                    sub_dirs.push((name, modified, id));
+                    sub_dirs.push((name, dir_modified, id));
                 } else {
+                    // Keep nanosecond precision for files
+                    let modified = meta.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
                     let id = next_id.fetch_add(1, Ordering::Relaxed);
                     let mut hash_data = Vec::with_capacity(name.len() + 16);
                     hash_data.extend_from_slice(name.as_bytes());
