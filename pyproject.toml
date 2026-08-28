@@ -4,13 +4,39 @@ build-backend = "maturin"
 
 [project]
 name = "fastfs"
+description = "A blisteringly fast, PyInstaller-friendly file system indexer and traversal library built with Rust and SQLite."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "FastFS Contributors" }
+]
+keywords = ["filesystem", "os.walk", "rust", "sqlite", "caching", "jwalk"]
 requires-python = ">=3.8"
 classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
+    "Topic :: System :: Filesystems",
 ]
 dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/vxlk/fastfs"
+Repository = "https://github.com/vxlk/fastfs"
+Issues = "https://github.com/vxlk/fastfs/issues"
 
 [tool.maturin]
 module-name = "fastfs._fastfs"

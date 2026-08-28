@@ -2,8 +2,15 @@
 name = "fastfs"
 version = "0.1.0"
 edition = "2024"
+authors = ["FastFS Contributors"]
+description = "A blisteringly fast, drop-in replacement for Python os.walk built with Rust, PyO3, jwalk, and SQLite."
+repository = "https://github.com/vxlk/fastfs"
+homepage = "https://github.com/vxlk/fastfs"
+license = "MIT"
+keywords = ["filesystem", "walk", "python", "pyo3"]
+categories = ["filesystem", "api-bindings"]
+readme = "README.md"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
 name = "_fastfs"
 crate-type = ["cdylib"]
@@ -15,6 +22,7 @@ crossbeam-channel = "0.5"
 rayon = "1.10"
 xxhash-rust = { version = "0.8.10", features = ["xxh64"] }
 jwalk = "0.9.0"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52.0", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
