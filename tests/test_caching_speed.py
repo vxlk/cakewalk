@@ -2,11 +2,11 @@ import os
 import time
 import tempfile
 import pytest
-from fastfs import FastFS
+from cakewalk import cakewalk
 
 def test_cache_read_speedup():
     """
-    Proves that reading from the FastFS SQLite cache via `scanner.walk()` 
+    Proves that reading from the cakewalk SQLite cache via `scanner.walk()` 
     is substantially faster than physically reading the filesystem via `os.walk()`.
     """
     with tempfile.TemporaryDirectory() as td:
@@ -29,7 +29,7 @@ def test_cache_read_speedup():
                         with open(os.path.join(d3, f"file_{f_idx}.txt"), "w") as f:
                             f.write("dummy data")
                             
-        scanner = FastFS(db_path)
+        scanner = cakewalk(db_path)
         
         # 1. Build the cache (Cold Scan)
         t0 = time.time()
@@ -47,4 +47,4 @@ def test_cache_read_speedup():
         print(f"Warm scan time: {warm_scan_time:.5f}s")
         
         # Prove that scanning a second time is significantly faster
-        assert warm_scan_time < cold_scan_time, "FastFS warm scan was slower than cold scan!"
+        assert warm_scan_time < cold_scan_time, "cakewalk warm scan was slower than cold scan!"

@@ -5,11 +5,11 @@ import atexit
 from typing import Generator, Tuple, List, Optional
 
 try:
-    from fastfs._fastfs import run_scan
+    from cakewalk._cakewalk import run_scan
 except ImportError:
-    from _fastfs import run_scan
+    from _cakewalk import run_scan
 
-class FastFSDirEntry:
+class cakewalkDirEntry:
     __slots__ = ('name', 'path', '_is_dir', '_stat_cache')
 
     def __init__(self, name: str, path: str, is_dir: bool):
@@ -39,9 +39,9 @@ class FastFSDirEntry:
         return self.path
 
     def __repr__(self) -> str:
-        return f"<FastFSDirEntry: {self.name!r}>"
+        return f"<cakewalkDirEntry: {self.name!r}>"
 
-class FastFS:
+class cakewalk:
     def __init__(self, db_location: str):
         self.db_location = db_location
         self.conn = None
@@ -151,11 +151,11 @@ class FastFS:
         
         current_id = self._get_node_id(cursor, path)
         if current_id is None:
-            raise FileNotFoundError(f"Path not found in FastFS: {path}")
+            raise FileNotFoundError(f"Path not found in cakewalk: {path}")
             
         cursor.execute("SELECT name, is_dir FROM fs_nodes WHERE parent_id = ?", (current_id,))
         for name, is_dir in cursor.fetchall():
-            yield FastFSDirEntry(name, os.path.join(path, name), is_dir)
+            yield cakewalkDirEntry(name, os.path.join(path, name), is_dir)
 
     def close(self):
         if self.conn:
@@ -164,11 +164,11 @@ class FastFS:
 
 _default_scanner = None
 
-def _get_default_scanner(path: str) -> FastFS:
+def _get_default_scanner(path: str) -> cakewalk:
     global _default_scanner
     if _default_scanner is None:
-        db_path = os.path.join(tempfile.gettempdir(), "fastfs_default_v1.db")
-        _default_scanner = FastFS(db_path)
+        db_path = os.path.join(tempfile.gettempdir(), "cakewalk_default_v1.db")
+        _default_scanner = cakewalk(db_path)
         atexit.register(_default_scanner.close)
     
     return _default_scanner
@@ -180,7 +180,7 @@ def update_cache(path: Optional[str] = None, background: bool = False):
         path = os.path.abspath(path)
     scanner.start_scan(path, background=background)
 
-class FastFSScandirIterator:
+class cakewalkScandirIterator:
     def __init__(self, scanner, path):
         self.scanner = scanner
         self.path = path
@@ -230,7 +230,7 @@ def walk(top: str, topdown: bool = True, onerror = None, followlinks: bool = Fal
             yield from os.walk(top, topdown=topdown, onerror=onerror, followlinks=followlinks)
         else:
             # blazing-fast native jwalk traversal
-            from fastfs._fastfs import live_walk
+            from cakewalk._cakewalk import live_walk
             yield from live_walk(top)
 
 def scandir(path: str = '.'):
@@ -255,8 +255,8 @@ def scandir(path: str = '.'):
                 pass
         
     if node_id is not None:
-        # Cache hit: Yield FastFS iterators
-        return FastFSScandirIterator(scanner, path)
+        # Cache hit: Yield cakewalk iterators
+        return cakewalkScandirIterator(scanner, path)
     else:
         # Cache miss: Fallback to native os.scandir
         return os.scandir(path)

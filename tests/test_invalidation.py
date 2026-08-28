@@ -1,7 +1,7 @@
 import os
 import time
 import tempfile
-from fastfs import FastFS
+from cakewalk import cakewalk
 
 def test_differential_cache_invalidation():
     """
@@ -28,7 +28,7 @@ def test_differential_cache_invalidation():
                         with open(os.path.join(d3, f"file_{f_idx}.txt"), "w") as f:
                             f.write("dummy data")
                             
-        scanner = FastFS(db_path)
+        scanner = cakewalk(db_path)
         
         # 2. First Scan (Cold Cache)
         t0 = time.time()

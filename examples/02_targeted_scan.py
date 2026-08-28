@@ -1,6 +1,6 @@
 import os
 import time
-from fastfs import FastFS
+from cakewalk import cakewalk
 
 def main():
     # Targeted scans are great for isolated directories
@@ -8,7 +8,7 @@ def main():
     target_dir = os.environ.get("TEMP", "C:\\Windows\\Temp")
     
     db_path = "cache_targeted.db"
-    scanner = FastFS(db_path)
+    scanner = cakewalk(db_path)
     
     print(f"Initiating targeted scan on {target_dir}")
     

@@ -3,12 +3,12 @@ requires = ["maturin>=1.11,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "fastfs"
+name = "cakewalk"
 description = "A blisteringly fast, PyInstaller-friendly file system indexer and traversal library built with Rust and SQLite."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
-    { name = "FastFS Contributors" }
+    { name = "cakewalk Contributors" }
 ]
 keywords = ["filesystem", "os.walk", "rust", "sqlite", "caching", "jwalk"]
 requires-python = ">=3.8"
@@ -34,9 +34,9 @@ classifiers = [
 dynamic = ["version"]
 
 [project.urls]
-Homepage = "https://github.com/vxlk/fastfs"
-Repository = "https://github.com/vxlk/fastfs"
-Issues = "https://github.com/vxlk/fastfs/issues"
+Homepage = "https://github.com/vxlk/cakewalk"
+Repository = "https://github.com/vxlk/cakewalk"
+Issues = "https://github.com/vxlk/cakewalk/issues"
 
 [tool.maturin]
-module-name = "fastfs._fastfs"
+module-name = "cakewalk._cakewalk"

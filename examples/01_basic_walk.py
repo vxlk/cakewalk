@@ -1,9 +1,9 @@
 import time
-from fastfs import FastFS
+from cakewalk import cakewalk
 
 def main():
     db_path = "cache_full.db"
-    scanner = FastFS(db_path)
+    scanner = cakewalk(db_path)
     
     print("Initiating full multi-drive sweep (A:\\ through Z:\\)")
     print("This will take 10-20 seconds on the first run, but future runs will be near-instant.")

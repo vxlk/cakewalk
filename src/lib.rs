@@ -391,7 +391,7 @@ fn live_walk(root: String) -> LiveWalk {
 }
 
 #[pymodule]
-fn _fastfs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _cakewalk(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_scan, m)?)?;
     m.add_function(wrap_pyfunction!(live_walk, m)?)?;
     Ok(())

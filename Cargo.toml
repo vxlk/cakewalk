@@ -1,18 +1,18 @@
 [package]
-name = "fastfs"
+name = "cakewalk"
 version = "0.1.0"
 edition = "2024"
-authors = ["FastFS Contributors"]
+authors = ["cakewalk Contributors"]
 description = "A blisteringly fast, drop-in replacement for Python os.walk built with Rust, PyO3, jwalk, and SQLite."
-repository = "https://github.com/vxlk/fastfs"
-homepage = "https://github.com/vxlk/fastfs"
+repository = "https://github.com/vxlk/cakewalk"
+homepage = "https://github.com/vxlk/cakewalk"
 license = "MIT"
 keywords = ["filesystem", "walk", "python", "pyo3"]
 categories = ["filesystem", "api-bindings"]
 readme = "README.md"
 
 [lib]
-name = "_fastfs"
+name = "_cakewalk"
 crate-type = ["cdylib"]
 
 [dependencies]

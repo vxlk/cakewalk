@@ -1,7 +1,7 @@
 import os
 import tempfile
 from hypothesis import given, settings, strategies as st
-from fastfs import FastFS
+from cakewalk import cakewalk
 
 reserved_windows_names = {
     "CON", "PRN", "AUX", "NUL",
@@ -55,14 +55,14 @@ def test_walk_equivalence(tree):
             os_walk_results.append((root, list(dirs), list(files)))
         os_walk_results.sort(key=lambda x: x[0])
             
-        import fastfs
+        import cakewalk
         
         # 1. Test Cache Miss Path (jwalk fallback)
-        # Ensure fastfs uses our test db path
-        fastfs._default_scanner = fastfs.FastFS(db_path)
+        # Ensure cakewalk uses our test db path
+        cakewalk._default_scanner = cakewalk.cakewalk(db_path)
         
         jwalk_results = []
-        for root, dirs, files in fastfs.walk(test_root):
+        for root, dirs, files in cakewalk.walk(test_root):
             dirs.sort()
             files.sort()
             jwalk_results.append((root, list(dirs), list(files)))
@@ -71,10 +71,10 @@ def test_walk_equivalence(tree):
         assert jwalk_results == os_walk_results, "Cache miss (jwalk) path failed equivalence"
         
         # 2. Test Cache Hit Path (SQLite traversal)
-        fastfs.update_cache(test_root)
+        cakewalk.update_cache(test_root)
         
         sqlite_results = []
-        for root, dirs, files in fastfs.walk(test_root):
+        for root, dirs, files in cakewalk.walk(test_root):
             dirs.sort()
             files.sort()
             sqlite_results.append((root, list(dirs), list(files)))
@@ -82,5 +82,5 @@ def test_walk_equivalence(tree):
             
         assert sqlite_results == os_walk_results, "Cache hit (SQLite) path failed equivalence"
         
-        fastfs._default_scanner.close()
-        fastfs._default_scanner = None
+        cakewalk._default_scanner.close()
+        cakewalk._default_scanner = None

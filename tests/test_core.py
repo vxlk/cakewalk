@@ -1,12 +1,12 @@
 import os
 import tempfile
 import pytest
-from fastfs import FastFS
+from cakewalk import cakewalk
 
 def test_missing_db():
     with tempfile.TemporaryDirectory() as td:
         db_path = os.path.join(td, "test.db")
-        scanner = FastFS(db_path)
+        scanner = cakewalk(db_path)
         with pytest.raises(FileNotFoundError):
             list(scanner.walk("C:\\"))
         scanner.close()
@@ -17,7 +17,7 @@ def test_missing_path():
         dummy_dir = os.path.join(td, "dummy")
         os.makedirs(dummy_dir)
         
-        scanner = FastFS(db_path)
+        scanner = cakewalk(db_path)
         scanner.start_scan(dummy_dir)
         
         results = list(scanner.walk(os.path.join(dummy_dir, "does_not_exist")))
@@ -32,7 +32,7 @@ def test_targeted_scan_case_sensitivity():
         with open(os.path.join(dummy_dir, "file.txt"), "w") as f:
             f.write("test")
             
-        scanner = FastFS(db_path)
+        scanner = cakewalk(db_path)
         scanner.start_scan(dummy_dir)
         
         results = list(scanner.walk(dummy_dir))

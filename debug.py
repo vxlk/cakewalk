@@ -1,7 +1,7 @@
 import os
 import tempfile
 import sqlite3
-from fastfs import FastFS
+from cakewalk import cakewalk
 
 def debug():
     with tempfile.TemporaryDirectory() as td:
@@ -13,7 +13,7 @@ def debug():
             
         print("dummy_dir:", repr(dummy_dir))
         
-        scanner = FastFS(db_path)
+        scanner = cakewalk(db_path)
         scanner.start_scan(dummy_dir)
         
         c = sqlite3.connect(db_path).cursor()
