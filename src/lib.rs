@@ -355,7 +355,7 @@ impl LiveWalk {
 
     fn __next__(mut slf: PyRefMut<'_, Self>, py: Python) -> Option<(String, Vec<String>, Vec<String>)> {
         let receiver = slf.receiver.clone();
-        py.allow_threads(|| receiver.recv().ok())
+        py.detach(|| receiver.recv().ok())
     }
 }
 
