@@ -27,6 +27,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
+name = "cakewalk"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "jwalk",
+ "libc",
+ "pyo3",
+ "rayon",
+ "rusqlite",
+ "windows-sys",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "cc"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -115,20 +129,6 @@ name = "fallible-streaming-iterator"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
-
-[[package]]
-name = "cakewalk"
-version = "0.1.0"
-dependencies = [
- "crossbeam-channel",
- "jwalk",
- "libc",
- "pyo3",
- "rayon",
- "rusqlite",
- "windows-sys",
- "xxhash-rust",
-]
 
 [[package]]
 name = "find-msvc-tools"
