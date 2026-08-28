@@ -47,24 +47,40 @@ def test_walk_equivalence(tree):
         
         realize_tree(test_root, tree)
         
-        scanner = FastFS(db_path)
-        scanner.start_scan(test_root)
-        
+        # Baseline: os.walk
         os_walk_results = []
         for root, dirs, files in os.walk(test_root):
             dirs.sort()
             files.sort()
             os_walk_results.append((root, list(dirs), list(files)))
+        os_walk_results.sort(key=lambda x: x[0])
             
-        fastfs_results = []
-        for root, dirs, files in scanner.walk(test_root):
+        import fastfs
+        
+        # 1. Test Cache Miss Path (jwalk fallback)
+        # Ensure fastfs uses our test db path
+        fastfs._default_scanner = fastfs.FastFS(db_path)
+        
+        jwalk_results = []
+        for root, dirs, files in fastfs.walk(test_root):
             dirs.sort()
             files.sort()
-            fastfs_results.append((root, list(dirs), list(files)))
+            jwalk_results.append((root, list(dirs), list(files)))
+        jwalk_results.sort(key=lambda x: x[0])
+        
+        assert jwalk_results == os_walk_results, "Cache miss (jwalk) path failed equivalence"
+        
+        # 2. Test Cache Hit Path (SQLite traversal)
+        fastfs.update_cache(test_root)
+        
+        sqlite_results = []
+        for root, dirs, files in fastfs.walk(test_root):
+            dirs.sort()
+            files.sort()
+            sqlite_results.append((root, list(dirs), list(files)))
+        sqlite_results.sort(key=lambda x: x[0])
             
-        scanner.close()
+        assert sqlite_results == os_walk_results, "Cache hit (SQLite) path failed equivalence"
         
-        os_walk_results.sort(key=lambda x: x[0])
-        fastfs_results.sort(key=lambda x: x[0])
-        
-        assert fastfs_results == os_walk_results
+        fastfs._default_scanner.close()
+        fastfs._default_scanner = None

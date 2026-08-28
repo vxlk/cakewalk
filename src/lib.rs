@@ -71,44 +71,50 @@ fn traverse(
     let mut batch = Vec::new();
     let mut sub_dirs = Vec::new();
 
-    if let Ok(entries) = std::fs::read_dir(&path) {
-        for entry in entries.flatten() {
-            if let Ok(meta) = entry.metadata() {
-                let is_dir = meta.is_dir();
-                let name = match entry.file_name().into_string() {
-                    Ok(s) => s,
-                    Err(os_str) => os_str.to_string_lossy().into_owned(),
-                };
-                
-                let size = meta.len();
+    let entries = match std::fs::read_dir(&path) {
+        Ok(e) => e,
+        Err(_) => return cached_old_hash.unwrap_or(0),
+    };
 
-                if is_dir {
-                    // Truncate directory mtime to seconds to avoid NTFS lazy flush invalidation storms
-                    let dir_modified = meta.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-                    let cached_id = cache_map.get(&(this_dir_id, name.clone())).map(|c| c.0);
-                    let id = cached_id.unwrap_or_else(|| next_id.fetch_add(1, Ordering::Relaxed));
-                    sub_dirs.push((name, dir_modified, id));
-                } else {
-                    // Keep nanosecond precision for files
-                    let modified = meta.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
-                    let id = next_id.fetch_add(1, Ordering::Relaxed);
-                    let mut hash_data = Vec::with_capacity(name.len() + 16);
-                    hash_data.extend_from_slice(name.as_bytes());
-                    hash_data.extend_from_slice(&size.to_le_bytes());
-                    hash_data.extend_from_slice(&modified.to_le_bytes());
-                    
-                    let hash = xxh64(&hash_data, 0);
-                    child_hash_sum = child_hash_sum.wrapping_add(hash);
-                    
-                    batch.push(Node {
-                        id,
-                        parent_id: Some(this_dir_id),
-                        name,
-                        is_dir: false,
-                        node_hash: hash as i64,
-                        last_modified: modified,
-                    });
-                }
+    for entry in entries.flatten() {
+        let mut child_path = path.clone();
+        child_path.push(entry.file_name());
+        
+        if let Ok(meta) = std::fs::symlink_metadata(&child_path) {
+            let is_dir = meta.is_dir();
+            let name = match entry.file_name().into_string() {
+                Ok(s) => s,
+                Err(os_str) => os_str.to_string_lossy().into_owned(),
+            };
+            
+            let size = meta.len();
+
+            if is_dir {
+                // Truncate directory mtime to seconds to avoid NTFS lazy flush invalidation storms
+                let dir_modified = meta.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                let cached_id = cache_map.get(&(this_dir_id, name.clone())).map(|c| c.0);
+                let id = cached_id.unwrap_or_else(|| next_id.fetch_add(1, Ordering::Relaxed));
+                sub_dirs.push((name, dir_modified, id));
+            } else {
+                // Keep nanosecond precision for files
+                let modified = meta.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
+                let id = next_id.fetch_add(1, Ordering::Relaxed);
+                let mut hash_data = Vec::with_capacity(name.len() + 16);
+                hash_data.extend_from_slice(name.as_bytes());
+                hash_data.extend_from_slice(&size.to_le_bytes());
+                hash_data.extend_from_slice(&modified.to_le_bytes());
+                
+                let hash = xxh64(&hash_data, 0);
+                child_hash_sum = child_hash_sum.wrapping_add(hash);
+                
+                batch.push(Node {
+                    id,
+                    parent_id: Some(this_dir_id),
+                    name,
+                    is_dir: false,
+                    node_hash: hash as i64,
+                    last_modified: modified,
+                });
             }
         }
     }
@@ -300,15 +306,6 @@ fn run_scan(db_path: &str, root: Option<String>, background: Option<bool>) -> Py
     };
 
     pool.install(|| {
-        let empty_vec = Vec::new();
-        let old_roots = parent_to_children.get(&usize::MAX).unwrap_or(&empty_vec);
-        for old_root in old_roots {
-            if !drives.contains(old_root) {
-                if let Some(&(old_id, _, _)) = cache_map.get(&(usize::MAX, old_root.clone())) {
-                    let _ = tx.send(DbMessage::DeleteNode(old_id));
-                }
-            }
-        }
     
         for drive in drives {
             let tx_clone = tx.clone();
@@ -345,8 +342,57 @@ fn run_scan(db_path: &str, root: Option<String>, background: Option<bool>) -> Py
     Ok(())
 }
 
+#[pyclass]
+struct LiveWalk {
+    receiver: crossbeam_channel::Receiver<(String, Vec<String>, Vec<String>)>,
+}
+
+#[pymethods]
+impl LiveWalk {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(mut slf: PyRefMut<'_, Self>, py: Python) -> Option<(String, Vec<String>, Vec<String>)> {
+        let receiver = slf.receiver.clone();
+        py.allow_threads(|| receiver.recv().ok())
+    }
+}
+
+#[pyfunction]
+fn live_walk(root: String) -> LiveWalk {
+    let (tx, rx) = crossbeam_channel::bounded(100);
+    
+    std::thread::spawn(move || {
+        for _ in jwalk::WalkDir::new(&root).process_read_dir(move |_, path, _, children| {
+            let mut dirs = Vec::new();
+            let mut files = Vec::new();
+            
+            for child in children.iter().flatten() {
+                let name = child.file_name.to_string_lossy().into_owned();
+                if child.file_type.is_dir() {
+                    dirs.push(name);
+                } else {
+                    files.push(name);
+                }
+            }
+            
+            let root_str = path.to_string_lossy().into_owned();
+            
+            // jwalk sometimes processes the parent of the root directory to stat the root itself.
+            // We should only yield paths that are equal to or inside the root we asked for.
+            if root_str.starts_with(&root) {
+                let _ = tx.send((root_str, dirs, files));
+            }
+        }) {}
+    });
+
+    LiveWalk { receiver: rx }
+}
+
 #[pymodule]
 fn _fastfs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_scan, m)?)?;
+    m.add_function(wrap_pyfunction!(live_walk, m)?)?;
     Ok(())
 }
