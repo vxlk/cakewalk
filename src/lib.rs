@@ -353,7 +353,7 @@ impl LiveWalk {
         slf
     }
 
-    fn __next__(mut slf: PyRefMut<'_, Self>, py: Python) -> Option<(String, Vec<String>, Vec<String>)> {
+    fn __next__(slf: PyRefMut<'_, Self>, py: Python) -> Option<(String, Vec<String>, Vec<String>)> {
         let receiver = slf.receiver.clone();
         py.detach(|| receiver.recv().ok())
     }

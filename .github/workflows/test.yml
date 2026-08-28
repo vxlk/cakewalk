@@ -8,15 +8,19 @@ on:
 
 jobs:
   test:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+        python-version: ['3.13', '3.14', '3.14t']
     
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
-        python-version: '3.13'
+        python-version: ${{ matrix.python-version }}
         
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -26,6 +30,10 @@ jobs:
         python -m pip install --upgrade pip
         pip install maturin pytest hypothesis
         
+    - name: Run rust tests
+      run: |
+        cargo test
+        
     - name: Build and install cakewalk
       run: |
         pip install -e .
@@ -33,3 +41,4 @@ jobs:
     - name: Run tests
       run: |
         pytest tests/
+
