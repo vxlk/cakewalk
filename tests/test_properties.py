@@ -13,7 +13,10 @@ valid_names = st.text(
     alphabet=st.characters(blacklist_categories=('Cc', 'Cs'), blacklist_characters=['\\', '/', ':', '*', '?', '"', '<', '>', '|', '\0']), 
     min_size=1, 
     max_size=20
-).map(lambda s: s.strip('. ')).filter(lambda s: bool(s) and s.upper() not in reserved_windows_names)
+# Only *trailing* dots and spaces are illegal on Windows. Stripping leading dots too would
+# make it impossible for this strategy to ever generate a dotfile, which is exactly the case
+# that used to diverge between the jwalk and SQLite paths.
+).map(lambda s: s.rstrip('. ')).filter(lambda s: bool(s) and s.upper() not in reserved_windows_names)
 
 def trees():
     return st.recursive(

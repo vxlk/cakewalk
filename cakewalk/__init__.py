@@ -2,6 +2,7 @@ import sqlite3
 import os
 import tempfile
 import atexit
+from itertools import islice
 from typing import Generator, Tuple, List, Optional
 
 try:
@@ -9,14 +10,29 @@ try:
 except ImportError:
     from _cakewalk import run_scan
 
-class cakewalkDirEntry:
-    __slots__ = ('name', 'path', '_is_dir', '_stat_cache')
+#: Trust the cache completely. Zero filesystem access on the read path.
+VALIDATE_NONE = 'none'
+#: Stat only the directory being walked (one syscall). If its mtime matches the cache, the
+#: entire subtree below it is trusted. This catches additions and deletions *directly* in
+#: that directory; a change deeper in the tree does not move its mtime and will not be seen
+#: until the next update_cache(). Default.
+VALIDATE_ROOT = 'root'
+#: Stat every directory as it is walked, re-reading any whose mtime moved. Exact, but costs
+#: one syscall per directory.
+VALIDATE_FULL = 'full'
 
-    def __init__(self, name: str, path: str, is_dir: bool):
+
+class cakewalkDirEntry:
+    __slots__ = ('name', 'path', '_is_dir', '_stat_cache', 'size')
+
+    def __init__(self, name: str, path: str, is_dir: bool, size: int = 0):
         self.name = name
         self.path = path
         self._is_dir = is_dir
         self._stat_cache = None
+        #: Cached size. For files, the size in bytes at scan time. For directories, the
+        #: rolled-up size of the whole subtree. Served from the index, no IO.
+        self.size = size
 
     def inode(self) -> int:
         return self.stat().st_ino
@@ -41,10 +57,58 @@ class cakewalkDirEntry:
     def __repr__(self) -> str:
         return f"<cakewalkDirEntry: {self.name!r}>"
 
+#: Columns the block reader pulls per node. Every column costs real time: the sqlite3
+#: bridge converts each value individually, and transfer scales close to linearly with
+#: column count, so this list is kept to exactly what a walk needs.
+_BLOCK_SQL = (
+    "SELECT name, is_dir, child_start, child_end FROM fs_nodes "
+    "WHERE id BETWEEN ? AND ? ORDER BY id"
+)
+
+
+class _BlockReader:
+    """Reads directory blocks out of the index with a single forward-moving cursor.
+
+    The scanner lays every directory's children out as one contiguous id range, with the
+    blocks themselves in depth-first order, so an unpruned walk consumes this cursor
+    strictly in order and never re-queries. That is the whole point: it turns a walk into
+    one sequential scan of the database file instead of a seek per directory.
+
+    A prune breaks the sequence, and the reader re-seeks past the skipped subtree rather
+    than streaming rows it is going to discard -- which is what makes pruning a large
+    subtree actually cheap rather than merely correct.
+    """
+
+    __slots__ = ('_cursor', '_hi', '_pos', '_iter', 'seeks')
+
+    def __init__(self, conn, hi):
+        self._cursor = conn.cursor()
+        self._cursor.arraysize = 1024
+        self._hi = hi
+        self._pos = None
+        self._iter = None
+        #: Number of re-seeks performed. Zero for an unpruned walk.
+        self.seeks = 0
+
+    def block(self, start, end):
+        if self._pos != start:
+            self._cursor.execute(_BLOCK_SQL, (start, self._hi))
+            self._iter = iter(self._cursor)
+            self._pos = start
+            self.seeks += 1
+        rows = list(islice(self._iter, end - start + 1))
+        self._pos += len(rows)
+        return rows
+
+    def close(self):
+        self._cursor.close()
+
+
 class cakewalk:
     def __init__(self, db_location: str):
         self.db_location = db_location
         self.conn = None
+        self._blocks_available = None
 
     def start_scan(self, root: Optional[str] = None, background: bool = False):
         if root:
@@ -62,6 +126,12 @@ class cakewalk:
             self.conn.execute("PRAGMA journal_mode = WAL;")
             self.conn.execute("PRAGMA synchronous = NORMAL;")
             self.conn.execute("PRAGMA cache_size = -64000;")
+            # Backfill on databases written before idx_parent_id existed. Without it every
+            # read-path query falls back to a full table scan.
+            try:
+                self.conn.execute("CREATE INDEX IF NOT EXISTS idx_parent_id ON fs_nodes(parent_id);")
+            except sqlite3.Error:
+                pass
         return self.conn
 
     def _get_node_id(self, cursor, path: str):
@@ -100,47 +170,277 @@ class cakewalk:
                     
         return current_id
 
-    def walk(self, top: str, topdown: bool = True, onerror = None, followlinks: bool = False):
+    def walk(self, top: str, topdown: bool = True, onerror = None, followlinks: bool = False,
+             validate: str = VALIDATE_ROOT):
         conn = self._get_conn()
         cursor = conn.cursor()
-        
+
         current_id = self._get_node_id(cursor, top)
         if current_id is None:
             return
-            
-        yield from self._walk_recursive(top, current_id, topdown, onerror, followlinks)
 
-    def _walk_recursive(self, current_path, node_id, topdown, onerror, followlinks):
-        cursor = self.conn.cursor()
+        yield from self._walk_cached(top, current_id, topdown, onerror, followlinks, validate)
+
+    def _node_mtime(self, node_id):
+        row = self.conn.execute(
+            "SELECT last_modified FROM fs_nodes WHERE id = ?", (node_id,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def _has_blocks(self):
+        """Whether this database carries the contiguous-child-block layout.
+
+        Databases written before the layout existed still read correctly, just via the
+        slower seek-per-directory path, so this is a capability check rather than a
+        version gate.
+        """
+        if self._blocks_available is None:
+            try:
+                cols = {r[1] for r in self._get_conn().execute("PRAGMA table_info(fs_nodes)")}
+            except sqlite3.Error:
+                cols = set()
+            self._blocks_available = {'child_start', 'child_end', 'subtree_last'} <= cols
+        return self._blocks_available
+
+    def _block_extent(self, node_id):
+        row = self._get_conn().execute(
+            "SELECT child_start, child_end, subtree_last FROM fs_nodes WHERE id = ?",
+            (node_id,),
+        ).fetchone()
+        return row
+
+    def _walk_blocks(self, top, extent, topdown):
+        """Walk out of the block layout: one forward pass, O(depth) memory.
+
+        Blocks are always *read* in depth-first pre-order, because that is how they are
+        stored. `topdown` only changes when each directory's tuple is handed to the caller,
+        so bottom-up costs the same sequential scan and still holds only the directories on
+        the current path.
+        """
+        child_start, child_end, subtree_last = extent
+        reader = _BlockReader(self._get_conn(), subtree_last)
+        join = os.path.join
         try:
-            cursor.execute("SELECT name, is_dir FROM fs_nodes WHERE parent_id = ?", (node_id,))
-            children = cursor.fetchall()
-        except Exception as err:
-            if onerror is not None:
-                onerror(err)
-            return
+            # frame: [path, dirnames, filenames, subdirs, next_child_index]
+            root = [top, None, None, None, 0]
+            root[1:4] = self._read_block(reader, child_start, child_end)
+            stack = [root]
 
-        dirnames = []
-        filenames = []
-        
-        for name, is_dir in children:
+            while stack:
+                frame = stack[-1]
+                path, dirnames, filenames, subdirs, idx = frame
+
+                if topdown and idx == 0:
+                    yield path, dirnames, filenames
+                    # os.walk contract: the caller may prune dirnames in place after the
+                    # yield. Anything dropped here is skipped with a seek, so its blocks
+                    # are never transferred.
+                    if len(dirnames) != len(subdirs):
+                        kept = set(dirnames)
+                        subdirs = [d for d in subdirs if d[0] in kept]
+                        frame[3] = subdirs
+
+                if idx < len(subdirs):
+                    frame[4] = idx + 1
+                    name, cs, ce = subdirs[idx]
+                    child = [join(path, name), None, None, None, 0]
+                    child[1:4] = self._read_block(reader, cs, ce)
+                    stack.append(child)
+                    continue
+
+                stack.pop()
+                if not topdown:
+                    yield path, dirnames, filenames
+        finally:
+            reader.close()
+
+    @staticmethod
+    def _read_block(reader, child_start, child_end):
+        """Split one directory's block into (dirnames, filenames, subdir extents)."""
+        if child_end < child_start:
+            return [], [], []
+        dirnames, filenames, subdirs = [], [], []
+        for name, is_dir, cs, ce in reader.block(child_start, child_end):
             if is_dir:
                 dirnames.append(name)
+                subdirs.append((name, cs, ce))
             else:
                 filenames.append(name)
-                
+        return dirnames, filenames, subdirs
+
+    def _children(self, cursor, node_id):
+        """Fetch one directory's children.
+
+        Deliberately *not* a bulk subtree load. Holding a whole tree in Python objects is
+        fine for a project directory and fatal for a multi-terabyte share, so the walk
+        streams: one indexed seek per directory, and only for directories the caller
+        actually descends into. Pruning therefore costs nothing instead of being paid for
+        up front.
+        """
+        cursor.execute(
+            "SELECT id, name, is_dir, last_modified FROM fs_nodes WHERE parent_id = ?",
+            (node_id,),
+        )
+        dirs = []
+        files = []
+        for child_id, name, is_dir, last_modified in cursor.fetchall():
+            if is_dir:
+                dirs.append((child_id, name, last_modified))
+            else:
+                files.append(name)
+        return dirs, files
+
+    def _check_fresh(self, path, cached_mtime, onerror):
+        """Return 'ok', 'stale' or 'gone' for a cached directory.
+
+        Directory mtimes are stored truncated to whole seconds by the Rust scanner, so
+        compare at the same resolution.
+        """
+        try:
+            live = os.stat(path).st_mtime_ns // 1_000_000_000
+        except OSError as err:
+            if onerror is not None:
+                onerror(err)
+            return 'gone'
+        if cached_mtime is None or live != cached_mtime:
+            return 'stale'
+        return 'ok'
+
+    def _walk_cached(self, top, node_id, topdown, onerror, followlinks,
+                     validate=VALIDATE_ROOT):
+        """Stream a walk out of the index.
+
+        Memory is proportional to the traversal frontier, not to the size of the tree, so
+        this runs the same on a source checkout and on a shared drive with tens of millions
+        of nodes.
+
+        See VALIDATE_NONE / VALIDATE_ROOT / VALIDATE_FULL for the freshness policy.
+        """
+        if validate not in (VALIDATE_NONE, VALIDATE_ROOT, VALIDATE_FULL):
+            raise ValueError(
+                f"validate must be one of {VALIDATE_NONE!r}, {VALIDATE_ROOT!r}, "
+                f"{VALIDATE_FULL!r}; got {validate!r}"
+            )
+
+        # One stat, then trust everything beneath it.
+        if validate == VALIDATE_ROOT:
+            status = self._check_fresh(top, self._node_mtime(node_id), onerror)
+            if status == 'gone':
+                return
+            if status == 'stale':
+                yield from os.walk(top, topdown=topdown, onerror=onerror, followlinks=followlinks)
+                return
+
+        per_dir = validate == VALIDATE_FULL
+
+        # The fast path. VALIDATE_FULL is deliberately excluded: it stats every directory as
+        # it goes, so it is bounded by syscalls rather than by query cost, and it needs to
+        # be able to drop into a live os.walk part-way down -- neither of which the single
+        # forward cursor is built for.
+        if not per_dir and self._has_blocks():
+            extent = self._block_extent(node_id)
+            if extent is not None:
+                yield from self._walk_blocks(top, extent, topdown)
+                return
+
+        cursor = self._get_conn().cursor()
+
         if topdown:
-            yield current_path, dirnames, filenames
-            
-        for dirname in dirnames:
-            child_path = os.path.join(current_path, dirname)
-            cursor.execute("SELECT id FROM fs_nodes WHERE parent_id = ? AND name = ? AND is_dir = 1", (node_id, dirname))
-            child_row = cursor.fetchone()
-            if child_row:
-                yield from self._walk_recursive(child_path, child_row[0], topdown, onerror, followlinks)
-                
-        if not topdown:
-            yield current_path, dirnames, filenames
+            stack = [(top, node_id, None)]
+            while stack:
+                path, nid, mtime = stack.pop()
+
+                if per_dir:
+                    status = self._check_fresh(path, mtime, onerror)
+                    if status == 'gone':
+                        continue
+                    if status == 'stale':
+                        yield from os.walk(path, topdown=True, onerror=onerror, followlinks=followlinks)
+                        continue
+
+                dirs, filenames = self._children(cursor, nid)
+                dirnames = [name for _, name, _ in dirs]
+
+                yield path, dirnames, filenames
+
+                # os.walk contract: the caller may prune dirnames in place after the yield.
+                # Because children are fetched lazily, a pruned subtree is never queried.
+                kept = set(dirnames)
+                for child_id, name, child_mtime in reversed(dirs):
+                    if name in kept:
+                        stack.append((os.path.join(path, name), child_id, child_mtime))
+        else:
+            stack = [(top, node_id, None, False)]
+            while stack:
+                path, nid, mtime, expanded = stack.pop()
+
+                if expanded:
+                    dirs, filenames = self._children(cursor, nid)
+                    yield path, [name for _, name, _ in dirs], filenames
+                    continue
+
+                if per_dir:
+                    status = self._check_fresh(path, mtime, onerror)
+                    if status == 'gone':
+                        continue
+                    if status == 'stale':
+                        yield from os.walk(path, topdown=False, onerror=onerror, followlinks=followlinks)
+                        continue
+
+                dirs, _ = self._children(cursor, nid)
+                stack.append((path, nid, mtime, True))
+                for child_id, name, child_mtime in reversed(dirs):
+                    stack.append((os.path.join(path, name), child_id, child_mtime, False))
+
+    def du(self, path: str):
+        """Total bytes, file count and directory count beneath ``path``.
+
+        A single indexed lookup against rollups computed during the scan, so this is O(1)
+        regardless of how large the subtree is. Returns None if the path is not indexed.
+        """
+        conn = self._get_conn()
+        node_id = self._get_node_id(conn.cursor(), path)
+        if node_id is None:
+            return None
+        row = conn.execute(
+            "SELECT size, file_count, dir_count FROM fs_nodes WHERE id = ?", (node_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {'size': row[0], 'files': row[1], 'dirs': row[2]}
+
+    def cache_info(self, path: str):
+        """What the index knows about ``path``: rollups, and how old the scan is."""
+        import time as _time
+
+        conn = self._get_conn()
+        node_id = self._get_node_id(conn.cursor(), path)
+        if node_id is None:
+            return None
+
+        row = conn.execute(
+            "SELECT size, file_count, dir_count, last_modified FROM fs_nodes WHERE id = ?",
+            (node_id,),
+        ).fetchone()
+        if row is None:
+            return None
+
+        # scan_meta is keyed by the root that was swept, which may be an ancestor of `path`.
+        scanned_at = None
+        try:
+            meta = conn.execute("SELECT max(scanned_at) FROM scan_meta").fetchone()
+            scanned_at = meta[0] if meta else None
+        except sqlite3.Error:
+            pass
+
+        return {
+            'size': row[0],
+            'files': row[1],
+            'dirs': row[2],
+            'mtime': row[3],
+            'scanned_at': scanned_at,
+            'age_seconds': None if scanned_at is None else int(_time.time()) - scanned_at,
+        }
 
     def scandir(self, path: str = '.'):
         if path == '.':
@@ -153,9 +453,9 @@ class cakewalk:
         if current_id is None:
             raise FileNotFoundError(f"Path not found in cakewalk: {path}")
             
-        cursor.execute("SELECT name, is_dir FROM fs_nodes WHERE parent_id = ?", (current_id,))
-        for name, is_dir in cursor.fetchall():
-            yield cakewalkDirEntry(name, os.path.join(path, name), is_dir)
+        cursor.execute("SELECT name, is_dir, size FROM fs_nodes WHERE parent_id = ?", (current_id,))
+        for name, is_dir, size in cursor.fetchall():
+            yield cakewalkDirEntry(name, os.path.join(path, name), is_dir, size)
 
     def close(self):
         if self.conn:
@@ -201,9 +501,10 @@ class cakewalkScandirIterator:
     def close(self):
         self._gen.close()
 
-def walk(top: str, topdown: bool = True, onerror = None, followlinks: bool = False):
+def walk(top: str, topdown: bool = True, onerror = None, followlinks: bool = False,
+         validate: str = VALIDATE_ROOT):
     scanner = _get_default_scanner(top)
-    
+
     current_id = None
     try:
         conn = scanner._get_conn()
@@ -221,8 +522,8 @@ def walk(top: str, topdown: bool = True, onerror = None, followlinks: bool = Fal
                 pass
     
     if current_id is not None:
-        # Cache hit: 0-IO SQLite traversal
-        yield from scanner._walk_recursive(top, current_id, topdown, onerror, followlinks)
+        # Cache hit: stream the walk out of the index.
+        yield from scanner._walk_cached(top, current_id, topdown, onerror, followlinks, validate)
     else:
         # Cache miss: Fallback
         if onerror is not None:
@@ -260,3 +561,25 @@ def scandir(path: str = '.'):
     else:
         # Cache miss: Fallback to native os.scandir
         return os.scandir(path)
+
+
+def du(path: str):
+    """Total bytes, file count and directory count beneath ``path``, from the index.
+
+    O(1): the totals are rolled up during the scan, so this costs one indexed lookup no
+    matter how large the subtree is. Returns None if ``path`` has not been scanned.
+    """
+    scanner = _get_default_scanner(path)
+    try:
+        return scanner.du(os.path.abspath(path))
+    except (FileNotFoundError, sqlite3.Error):
+        return None
+
+
+def cache_info(path: str):
+    """Rollups for ``path`` plus how old the scan is, or None if it is not indexed."""
+    scanner = _get_default_scanner(path)
+    try:
+        return scanner.cache_info(os.path.abspath(path))
+    except (FileNotFoundError, sqlite3.Error):
+        return None
