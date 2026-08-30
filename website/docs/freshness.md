@@ -14,7 +14,7 @@ The index is a snapshot taken when you last ran `update_cache()`. Everything abo
 |---|---|---|---|
 | `'none'` | none | nothing | fastest |
 | `'root'` *(default)* | one `stat` | additions and deletions **directly in** the directory you are walking | one syscall |
-| `'full'` | one `stat` per directory | everything | roughly `os.walk` speed |
+| `'full'` | one `stat` per directory | everything | ~1.4x `os.walk` |
 
 ```python
 cakewalk.walk(path, validate="none")   # or cakewalk.VALIDATE_NONE
@@ -45,7 +45,7 @@ Directory mtimes are stored truncated to whole seconds, because NTFS lazy-flushe
 
 ## `'full'` — exact, and priced accordingly
 
-`'full'` stats every directory as it walks, and re-reads any whose mtime has moved. It is correct. It also does one syscall per directory, which is exactly the cost `os.walk` pays, so it runs at roughly `os.walk` speed and the index buys you very little.
+`'full'` stats every directory as it walks, and re-reads any whose mtime has moved. It is correct. It also does one syscall per directory, which is the same order of cost `os.walk` pays — measured at 1.40x `os.walk` on a 92,365-node tree, against 30x for the other two modes. It is ahead because a `stat` is cheaper than an enumeration, not because the index is doing much for you. If you need this mode on every walk, think hard about whether you want a cache at all.
 
 Use it when correctness matters more than latency, and be clear-eyed that in that mode you are mostly not using the cache.
 

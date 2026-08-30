@@ -32,6 +32,23 @@ Walking is unaffected — that side is `O(depth × fanout)` and stays in the kil
 
 If your tree relies on symlinks, results will differ from `os.walk(followlinks=True)`.
 
+### Windows directory junctions
+
+This one catches people out, because it differs from `os.walk` at its **default** settings, not just with `followlinks=True`.
+
+Given a junction created with `mklink /J viajunction real`, the four walkers disagree:
+
+| walker | result |
+|---|---|
+| `os.walk` | descends **through** it — reports `viajunction\inside\deep.txt` |
+| `pathlib.Path.walk` | does not descend; reports `viajunction` as an entry |
+| **cakewalk** | does not descend; reports `viajunction` as an entry |
+| `scandir_rs.Walk` | omits it entirely |
+
+cakewalk matches `pathlib`. The practical consequence: on a tree with pnpm-style `node_modules` junctions, `os.walk` reports substantially more entries than cakewalk does — 96,309 directories versus 91,981 on one real 790k-node checkout — because it walks the same content once per junction.
+
+Whether that is a bug or a feature depends on you: cakewalk will not double-count or loop, and `os.walk` will. But if you are diffing the two, this will be most of the difference.
+
 ## Sibling order can differ from `os.walk`
 
 Entries within one directory are ordered by SQLite's `BINARY` collation over UTF-8. `os.walk` returns `os.scandir` order, which on NTFS is UTF-16 code-unit order.

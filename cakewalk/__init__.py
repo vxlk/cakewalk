@@ -524,8 +524,14 @@ class cakewalk:
 
         cursor = self._get_conn().cursor()
 
+        # The top directory's own cached mtime. _check_fresh treats None as stale, so
+        # seeding the stack without it made VALIDATE_FULL declare the root stale on every
+        # walk and fall straight through to a live os.walk of the entire tree -- the mode
+        # never consulted the cache at all.
+        top_mtime = self._node_mtime(node_id) if per_dir else None
+
         if topdown:
-            stack = [(top, node_id, None)]
+            stack = [(top, node_id, top_mtime)]
             while stack:
                 path, nid, mtime = stack.pop()
 
@@ -549,7 +555,7 @@ class cakewalk:
                     if name in kept:
                         stack.append((os.path.join(path, name), child_id, child_mtime))
         else:
-            stack = [(top, node_id, None, False)]
+            stack = [(top, node_id, top_mtime, False)]
             while stack:
                 path, nid, mtime, expanded = stack.pop()
 

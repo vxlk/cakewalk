@@ -23,6 +23,32 @@ Producing N Python strings from data already in RAM costs about **95 ns each** o
 
 The current reader runs at 334 ns/node against a ~95 ns/name floor, so roughly 3.5x of headroom remains. Most of what was reachable has now been taken: moving the reader into Rust removed the `sqlite3` module from the hot path entirely, and it bought 1.21x.
 
+## Against other walkers
+
+Same tree, same process, 92,365 nodes, warm page cache:
+
+| walker | reads | median | ns/node | vs `os.walk` |
+|---|---|---:|---:|---:|
+| `os.walk` (stdlib) | filesystem | 1459 ms | 15796 | 1.00x |
+| `pathlib.Path.walk` | filesystem | 1114 ms | 12058 | 1.31x |
+| hand-rolled `os.scandir` | filesystem | 1005 ms | 10886 | 1.45x |
+| `scandir_rs.Walk.collect()` | filesystem | 528 ms | 5717 | 2.76x |
+| `scandir_rs.Walk` (iterate) | filesystem | 393 ms | 4259 | 3.71x |
+| **cakewalk, cache miss (jwalk)** | filesystem | 335 ms | 3624 | 4.36x |
+| cakewalk `validate='full'` | index + one `stat`/dir | 1043 ms | 11291 | 1.40x |
+| cakewalk `validate='root'` | index | 48 ms | 521 | **30.30x** |
+| cakewalk `validate='none'` | index | 49 ms | 526 | **30.01x** |
+
+Every walker was checked to return the identical set of entries in every round before being timed.
+
+Two things are worth separating here.
+
+**On the filesystem, cakewalk has no real edge.** Its cache-miss path is jwalk, and `scandir-rs` is also jwalk; 4.36x versus 3.71x is the same library with different plumbing, not a different idea. Anyone comparing cold-path traversal should treat these as equivalent.
+
+**The index is the whole difference** — 30x against the standard library, and about 7x against the fastest live walker available. That gap does not come from traversing better; it comes from not traversing.
+
+Timing note: live-filesystem walks on this machine vary by up to 10x run to run (an on-access scanner, most likely), while index reads vary by well under 2x. The walkers are therefore interleaved round-robin and the figure reported is the median of 9 rounds, so drift lands on all of them equally. A grouped benchmark would have handed whichever walker ran during a quiet stretch an advantage it had not earned.
+
 ## Walk speed
 
 A real index of 92,365 nodes (11,347 directories, 4.11 GiB), warm OS page cache. All three readers were checked to produce byte-identical output before timing:
@@ -56,7 +82,11 @@ Smaller tree, 13,871 nodes, showing the validate modes:
 | `validate='root'` | 27.7 ms | 7.26x |
 | `validate='full'` | 185.2 ms | 1.09x |
 
-`'full'` is the honest one. It stats every directory, which is precisely what `os.walk` does, so it lands at `os.walk` speed. In that mode the index is buying you almost nothing.
+`'full'` is the honest one. It stats every directory rather than enumerating it, so on the 92,365-node tree above it comes in at 1.40x `os.walk` — a little ahead, not the 30x the other modes get. If you need that mode, the index is buying you very little.
+
+:::note
+That 1.40x is recent. Until it was fixed, `validate='full'` seeded its traversal with no cached mtime for the top directory, which `_check_fresh` reads as stale — so it declared the root stale on every walk and fell straight through to a live `os.walk` of the whole tree. It never consulted the index at all, and measured at 0.47x. Results were always correct, which is why nothing caught it.
+:::
 
 ## How it scales
 

@@ -495,3 +495,59 @@ def test_readers_agree_exactly(scanned_default):
         if reference is None:
             reference = normalise(os.walk(root), root)
     assert reference
+
+
+def test_validate_full_actually_uses_the_cache(scanned_default, monkeypatch):
+    """VALIDATE_FULL must read the index for directories whose mtime has not moved.
+
+    It seeded its stack with mtime=None for the top directory, and _check_fresh treats
+    None as stale -- so the root was declared stale on every walk and the whole thing
+    fell through to a live os.walk. The mode was documented as "stat every directory,
+    re-read the ones that moved" and was in fact "never use the cache at all". Nothing
+    caught it because the results were still correct, just produced the slow way.
+    """
+    root, scanner = scanned_default
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("validate='full' fell back to a live os.walk")
+
+    monkeypatch.setattr(cw.os, "walk", forbidden)
+    for topdown in (True, False):
+        got = normalise(scanner.walk(root, topdown=topdown, validate="full"), root)
+        assert got, "walk produced nothing"
+
+
+def test_validate_full_still_sees_a_changed_directory(tmp_path):
+    """...and the fix must not cost it the freshness it exists for."""
+    root = str(tmp_path / "tree")
+    os.makedirs(root)
+    build_tree(root)
+    scanner = cakewalk(str(tmp_path / "cache.db"))
+    scanner.start_scan(root)
+    try:
+        # Directory mtimes are compared truncated to whole seconds, so a change made in
+        # the same second as the scan is invisible by design. Push the mtime forward
+        # explicitly rather than sleeping: it is the comparison being tested, not the
+        # clock.
+        def touch(path):
+            stamp = os.stat(path).st_mtime + 10
+            os.utime(path, (stamp, stamp))
+
+        # A file added straight into the walked root: the case validate='root' also sees.
+        with open(os.path.join(root, "appeared.txt"), "w") as fh:
+            fh.write("new")
+        touch(root)
+        found = normalise(scanner.walk(root, validate="full"), root)
+        assert "appeared.txt" in found[0][2]
+
+        # And one added deeper, which only validate='full' can catch -- the root's own
+        # mtime is left alone here, so nothing but a per-directory stat can find it.
+        deep = os.path.join(root, "a", "a1")
+        with open(os.path.join(deep, "deeper_appeared.txt"), "w") as fh:
+            fh.write("new")
+        touch(deep)
+        by_path = {p: (d, f) for p, d, f in
+                   normalise(scanner.walk(root, validate="full"), root)}
+        assert "deeper_appeared.txt" in by_path[os.path.join("a", "a1")][1]
+    finally:
+        scanner.close()

@@ -168,6 +168,28 @@ Be aware of what these numbers are and are not. Every row above reads from RAM, 
 
 `os.walk` in the table is also reading a warm page cache. Against a genuinely cold multi-terabyte share it is far slower than shown here, which is the case cakewalk exists for.
 
+### Against other walkers
+
+Same tree, same process, 92,365 nodes, warm page cache. Every walker was checked to return the identical set of entries in every round before being timed:
+
+| walker | reads | median | vs `os.walk` |
+|---|---|---:|---:|
+| `os.walk` (stdlib) | filesystem | 1459 ms | 1.00x |
+| `pathlib.Path.walk` | filesystem | 1114 ms | 1.31x |
+| hand-rolled `os.scandir` | filesystem | 1005 ms | 1.45x |
+| `scandir_rs.Walk.collect()` | filesystem | 528 ms | 2.76x |
+| `scandir_rs.Walk` (iterate) | filesystem | 393 ms | 3.71x |
+| **cakewalk, cache miss (jwalk)** | filesystem | 335 ms | 4.36x |
+| cakewalk `validate='full'` | index + one `stat`/dir | 1043 ms | 1.40x |
+| cakewalk `validate='root'` | index | 48 ms | **30.30x** |
+| cakewalk `validate='none'` | index | 49 ms | **30.01x** |
+
+**On the filesystem, cakewalk has no real edge.** Its cache-miss path is jwalk, and `scandir-rs` is also jwalk — 4.36x versus 3.71x is the same library with different plumbing, not a different idea.
+
+**The index is the whole difference:** 30x against the standard library, about 7x against the fastest live walker available. That does not come from traversing better. It comes from not traversing.
+
+Live-filesystem walks on this machine vary by up to 10x run to run; index reads vary by under 2x. The walkers are interleaved round-robin and the figure is the median of 9 rounds, so drift lands on all of them equally.
+
 ### Where `walk()` spends its time
 
 Decomposed on a 4.7-million-node index against the `fs_nodes` reader:
