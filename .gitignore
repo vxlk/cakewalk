@@ -4,3 +4,9 @@ __pycache__/
 *.whl
 .env
 .venv
+
+# Compiled extension. Built from src/ by maturin; committing it ships one
+# platform's binary to everyone and goes stale the moment the Rust changes.
+*.pyd
+*.so
+*.dylib
