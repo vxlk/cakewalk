@@ -115,15 +115,17 @@ def test_walk_equivalence(tree):
         cakewalk._default_scanner = None
 
 
-#: An index carries three layouts at once and picks the fastest available. Every one of
-#: them has to reproduce os.walk, so the fuzzing drives all three rather than whichever
+#: An index carries every layout at once and picks the fastest reader available. All of
+#: them have to reproduce os.walk, so the fuzzing drives each one rather than whichever
 #: happens to win the dispatch.
-READERS = ("dir_blocks", "fs_blocks", "per_directory")
+READERS = ("native", "dir_blocks", "fs_blocks", "per_directory")
 
 
 def _reader(db_path, which):
     scanner = cakewalk_mod.cakewalk(db_path)
-    if which != "dir_blocks":
+    if which != "native":
+        scanner._native_reader = False
+    if which in ("fs_blocks", "per_directory"):
         scanner._dir_blocks_available = False
     if which == "per_directory":
         scanner._blocks_available = False

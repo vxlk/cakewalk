@@ -63,7 +63,7 @@ export default function Home() {
                 30x faster than <code>os.walk</code>. The index underneath it is
                 an ordinary SQLite database where a subtree is a contiguous id
                 range, and{' '}
-                <Link to="/docs/sql">querying it directly</Link> is 16x to 693x
+                <Link to="/docs/sql">querying it directly</Link> is 18x to 685x
                 faster — because an aggregate never builds a Python object per
                 file.
               </p>

@@ -8,6 +8,8 @@ use std::time::UNIX_EPOCH;
 use xxhash_rust::xxh64::xxh64;
 use std::collections::HashMap;
 
+mod dirwalk;
+
 fn get_drives() -> Vec<String> {
     let mut drives = Vec::new();
     for c in b'A'..=b'Z' {
@@ -1002,5 +1004,6 @@ fn live_walk(root: String) -> LiveWalk {
 fn _cakewalk(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_scan, m)?)?;
     m.add_function(wrap_pyfunction!(live_walk, m)?)?;
+    m.add_class::<dirwalk::DirBlockWalk>()?;
     Ok(())
 }

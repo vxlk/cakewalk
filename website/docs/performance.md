@@ -10,7 +10,7 @@ All figures below were measured on one Windows machine with a local SSD. They ar
 
 ## The headline is not `walk()`
 
-`walk()` is about 30x faster than `os.walk`. Queries against the same index are 16x to 693x faster, and `du()` is faster still. The rest of this page explains both, but if you only read one table, read [this one](./sql.md#why-the-query-wins-and-by-how-much).
+`walk()` is about 30x faster than `os.walk`. Queries against the same index are 18x to 685x faster, and `du()` is faster still. The rest of this page explains both, but if you only read one table, read [this one](./sql.md#why-the-query-wins-and-by-how-much).
 
 The asymmetry is structural. `walk()` must return a Python string for every name in the tree; a query that ends in `sum()` or `LIMIT 20` returns one row. See [Where the time goes](#where-the-time-goes) below — the database contributes essentially nothing to `walk()`'s cost, so no amount of query tuning will close that gap.
 
@@ -21,7 +21,7 @@ Producing N Python strings from data already in RAM costs about **95 ns each** o
 - Handing back `bytes` instead of `str` costs 84 ns — a 12% saving, not a multiple. The allocation dominates, so changing the object *type* is not a lever.
 - Not materialising at all costs 5 ns. That is the only large saving available, and it is why an aggregate answered in SQL is 100x rather than 5x.
 
-The current reader runs at 679 ns/node against a ~95 ns/name floor, so roughly 7x of headroom remains — most of it the `sqlite3` module's per-row overhead, which is not reachable from Python.
+The current reader runs at 334 ns/node against a ~95 ns/name floor, so roughly 3.5x of headroom remains. Most of what was reachable has now been taken: moving the reader into Rust removed the `sqlite3` module from the hot path entirely, and it bought 1.21x.
 
 ## Walk speed
 
@@ -29,14 +29,15 @@ A real index of 92,365 nodes (11,347 directories, 4.11 GiB), warm OS page cache.
 
 | reader | time | ns/node | vs `os.walk` | vs previous |
 |---|---:|---:|---:|---:|
-| `os.walk` | 1981.7 ms | 21455 | 1.00x | |
-| seek per directory | 447.0 ms | 4839 | 4.43x | 4.43x |
-| `fs_nodes` block layout | 266.2 ms | 2882 | 7.44x | 1.68x |
-| `dir_blocks` projection | **62.7 ms** | **679** | **31.60x** | **4.24x** |
+| `os.walk` | 1050.6 ms | 11375 | 1.00x | |
+| seek per directory | 256.6 ms | 2778 | 4.09x | 4.09x |
+| `fs_nodes` block layout | 151.3 ms | 1638 | 6.94x | 1.70x |
+| `dir_blocks`, Python reader | 37.4 ms | 405 | 28.08x | 4.04x |
+| `dir_blocks`, Rust reader | **30.8 ms** | **334** | **34.06x** | **1.21x** |
 
 Each row is a design cakewalk actually shipped, so the deltas isolate what each change bought. The last one — [one row per directory with names packed](./architecture.md#dir_blocks-the-walk-projection) — is the largest, and for the reason the [decomposition](#where-the-time-goes) predicts: it removes boundary crossings rather than making queries smarter.
 
-`topdown=False` costs the same: 60.2 ms against the `fs_nodes` reader's 256.9 ms.
+`topdown=False` costs the same: 33.8 ms against the `fs_nodes` reader's 149.5 ms.
 
 An older measurement on a 36,527-node tree, kept because it isolates the block layout on its own:
 
@@ -58,6 +59,17 @@ Smaller tree, 13,871 nodes, showing the validate modes:
 `'full'` is the honest one. It stats every directory, which is precisely what `os.walk` does, so it lands at `os.walk` speed. In that mode the index is buying you almost nothing.
 
 ## How it scales
+
+The two projection readers against each other, driving the shipped code over synthesised indexes in the real schema. Output was verified byte-identical at every size:
+
+| shape | nodes | % dirs | index | `fs_nodes` | Python | Rust | Rust gain |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| d8 s3 f8 | 36,081 | 27.3% | 5.6 MiB | 65 ms | 25 ms | 16 ms | 1.52x |
+| d10 s3 f12 | 442,861 | 20.0% | 71.3 MiB | 819 ms | 243 ms | 192 ms | 1.26x |
+| d12 s3 f16 | 5,048,681 | 15.8% | 814.5 MiB | 9039 ms | 2608 ms | 1781 ms | 1.46x |
+| d11 s3 f40 | 3,808,640 | 7.0% | 640.3 MiB | 5389 ms | 990 ms | 803 ms | 1.23x |
+
+The projection's advantage over `fs_nodes` grows as trees get more file-heavy — 2.6x at 27% directories, 5.4x at 7% — which is the direction real trees lie in. The native reader's own gain does **not** grow with scale; it sits between 1.13x and 1.52x throughout, because what remains is the cost of the Python strings rather than anything the reader controls.
 
 The block layout's advantage over per-directory queries, driving the real reader against synthesised indexes:
 

@@ -28,7 +28,7 @@ for root, dirs, files in cakewalk.walk("D:\\share"):
 
 **It writes a second table, `dir_blocks`,** shaped for walking alone: one row per *directory*, with the children's names packed into two NUL-joined strings, keyed by depth-first pre-order so the table's physical order is walk order. `fs_nodes` has a row per node and twelve columns, and crossing that boundary — not the database — is where essentially all of a walk's time goes. One row per directory instead of one per node, with the name lists built by a single `str.split` in C, is worth **4.6x**. It also reads 2.6x fewer bytes off disk, since pulling `name` out of `fs_nodes` drags the hash, mtime and rollups along with it.
 
-`walk()` then streams `dir_blocks` on a single forward-moving cursor: one query for the whole tree, `O(depth)` memory, and no re-seeks unless you prune. `fs_nodes` stays the source of truth, and the table [queries](#query-the-index-directly) run against.
+`walk()` then streams `dir_blocks` on a single forward-moving cursor: one query for the whole tree, `O(depth)` memory, and no re-seeks unless you prune. The reader is native — rusqlite steps the rows and each name becomes a Python string straight from the packed blob, worth another 1.21x over doing the same thing through the `sqlite3` module. `fs_nodes` stays the source of truth, and the table [queries](#query-the-index-directly) run against.
 
 If a path is not in the index, `walk()` falls back to a parallel `jwalk` sweep of the live filesystem, so it always returns correct results.
 
@@ -138,13 +138,13 @@ Measured on the same index and in the same process as the table below — 92,365
 
 | question | `os.walk` | `cakewalk.walk` | SQL | SQL vs `os.walk` |
 |---|---:|---:|---:|---:|
-| total size of the tree | 6094.3 ms | — | 8.80 ms | 693x |
-| every `*.dll` beneath it | 929.6 ms | 35.8 ms | 13.56 ms | 69x |
-| 20 largest files | 6035.5 ms | — | 10.73 ms | 562x |
-| count and bytes by extension | 1075.9 ms | — | 65.49 ms | 16x |
-| total size, via `du()` rollup | 6027.2 ms | — | 0.019 ms | 311,737x |
+| total size of the tree | 6810.6 ms | — | 9.94 ms | 685x |
+| every `*.dll` beneath it | 1100.5 ms | 35.1 ms | 14.99 ms | 73x |
+| 20 largest files | 7184.1 ms | — | 13.34 ms | 539x |
+| count and bytes by extension | 1271.4 ms | — | 70.74 ms | 18x |
+| total size, via `du()` rollup | 6933.0 ms | — | 0.025 ms | 278,322x |
 
-The `*.dll` row is the honest apples-to-apples one: no `stat()` calls on either side, just names. `cakewalk.walk` is 26x faster than `os.walk` there; the query is 69x. The gap is not query cleverness — it is that the walk materialises 92,365 Python strings and the query materialises one integer.
+The `*.dll` row is the honest apples-to-apples one: no `stat()` calls on either side, just names. `cakewalk.walk` is 31x faster than `os.walk` there; the query is 73x. The gap is not query cleverness — it is that the walk materialises 92,365 Python strings and the query materialises one integer.
 
 `du()` is the extreme case, and the reason to reach for the rollups before writing anything: the answer was computed during the scan.
 
@@ -154,12 +154,13 @@ Measured on a real 92,365-node index (11,347 directories, 4.11 GiB), warm OS pag
 
 | reader | time | ns/node | vs `os.walk` | vs previous |
 |---|---:|---:|---:|---:|
-| `os.walk` | 1981.7 ms | 21455 | 1.00x | |
-| seek per directory | 447.0 ms | 4839 | 4.43x | 4.43x |
-| `fs_nodes` block layout | 266.2 ms | 2882 | 7.44x | 1.68x |
-| `dir_blocks` projection | **62.7 ms** | **679** | **31.60x** | **4.24x** |
+| `os.walk` | 1050.6 ms | 11375 | 1.00x | |
+| seek per directory | 256.6 ms | 2778 | 4.09x | 4.09x |
+| `fs_nodes` block layout | 151.3 ms | 1638 | 6.94x | 1.70x |
+| `dir_blocks`, Python reader | 37.4 ms | 405 | 28.08x | 4.04x |
+| `dir_blocks`, Rust reader | **30.8 ms** | **334** | **34.06x** | **1.21x** |
 
-Each row is a design cakewalk actually shipped, so the deltas isolate what each change bought. `topdown=False` costs the same: 60.2 ms against 256.9 ms.
+Each row is a design cakewalk actually shipped, so the deltas isolate what each change bought. `topdown=False` costs the same: 33.8 ms against 149.5 ms.
 
 The index costs about **122 bytes per node** — 99 without `dir_blocks`, so the projection is +23% — and a full walk holds a few KiB of Python objects regardless of tree size.
 

@@ -10,6 +10,17 @@ try:
 except ImportError:
     from _cakewalk import run_scan
 
+#: Native reader over the walk projection. Absent only when running against an extension
+#: built before it existed, in which case the Python reader below does the same job about
+#: 1.7x slower.
+try:
+    from cakewalk._cakewalk import DirBlockWalk
+except ImportError:
+    try:
+        from _cakewalk import DirBlockWalk
+    except ImportError:
+        DirBlockWalk = None
+
 #: Trust the cache completely. Zero filesystem access on the read path.
 VALIDATE_NONE = 'none'
 #: Stat only the directory being walked (one syscall). If its mtime matches the cache, the
@@ -148,6 +159,9 @@ class cakewalk:
         self.conn = None
         self._blocks_available = None
         self._dir_blocks_available = None
+        #: Set False to force the pure-Python projection reader. Only the tests do this,
+        #: so that both implementations stay covered rather than one shipping untested.
+        self._native_reader = True
 
     def start_scan(self, root: Optional[str] = None, background: bool = False):
         if root:
@@ -340,6 +354,15 @@ class cakewalk:
 
     def _walk_dir_blocks(self, top, extent, topdown):
         start, end = extent
+        # The native reader does the same traversal without the sqlite3 module in the way:
+        # rows are stepped in Rust and each name becomes a PyString straight from the packed
+        # blob, with no per-row tuple and no whole-blob str built only to be split. Worth
+        # about 1.7x. The Python reader below stays the reference implementation, is what
+        # runs if the extension predates it, and is exercised by the same tests.
+        if DirBlockWalk is not None and self._native_reader:
+            yield from DirBlockWalk(self.db_location, top, os.sep, start, end, topdown)
+            return
+
         reader = _DirBlockReader(self._get_conn(), end)
         try:
             if topdown:

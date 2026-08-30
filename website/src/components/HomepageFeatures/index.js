@@ -30,7 +30,7 @@ const FeatureList = [
       <>
         The index is a documented SQLite database, and a subtree is a
         contiguous id range. Aggregates, rankings and filters answered in SQL
-        run 16x to 693x faster than <code>os.walk</code>, because they never
+        run 18x to 685x faster than <code>os.walk</code>, because they never
         build a Python object per file.
       </>
     ),

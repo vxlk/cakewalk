@@ -35,14 +35,16 @@ def build_tree(root):
                 fh.write("data")
 
 
-#: The read paths, fastest first. An index carries all three layouts at once, so which one
-#: a walk takes is a capability decision -- and every one of them still has to reproduce
-#: os.walk exactly. Forcing the flags is how an old index is simulated without writing one.
-READERS = ("dir_blocks", "fs_blocks", "per_directory")
+#: The read paths, fastest first. An index carries every layout at once, so which one a
+#: walk takes is a capability decision -- and all of them still have to reproduce os.walk
+#: exactly. Forcing the flags simulates an older index or extension without writing one.
+READERS = ("native", "dir_blocks", "fs_blocks", "per_directory")
 
 
 def _select_reader(scanner, reader):
-    if reader != "dir_blocks":
+    if reader != "native":
+        scanner._native_reader = False
+    if reader in ("fs_blocks", "per_directory"):
         scanner._dir_blocks_available = False
     if reader == "per_directory":
         scanner._blocks_available = False
@@ -115,35 +117,55 @@ def test_walk_from_a_subdirectory(scanned, rel):
         normalise(os.walk(start), start)
 
 
-@pytest.mark.parametrize("reader_name", ["_DirBlockReader", "_BlockReader"])
-def test_unpruned_walk_never_reseeks(tmp_path, monkeypatch, reader_name):
+#: Every reader that counts its own query restarts, and the flag that selects it. The
+#: native reader is a Rust class rather than a subclassable one, so the probe delegates
+#: instead of inheriting.
+SEEK_COUNTERS = {
+    "native": ("DirBlockWalk", "native"),
+    "dir_blocks": ("_DirBlockReader", "dir_blocks"),
+    "fs_blocks": ("_BlockReader", "fs_blocks"),
+}
+
+
+def _probe(monkeypatch, attr):
+    """Record every reader the walk constructs, without changing its behaviour."""
+    made = []
+    original = getattr(cw, attr)
+
+    class Probe:
+        def __init__(self, *args, **kwargs):
+            self._inner = original(*args, **kwargs)
+            made.append(self)
+
+        def __iter__(self):
+            return iter(self._inner)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(cw, attr, Probe)
+    return made
+
+
+@pytest.mark.parametrize("which", list(SEEK_COUNTERS))
+def test_unpruned_walk_never_reseeks(tmp_path, monkeypatch, which):
     """The point of the layout: a full walk is one sequential pass, no re-queries.
 
     A regression here would not change any result, only make every walk slow again, so it
-    needs its own assertion. Both block readers must hold the property.
+    needs its own assertion. Every reader must hold the property.
     """
+    attr, flavour = SEEK_COUNTERS[which]
     root = str(tmp_path / "tree")
     os.makedirs(root)
     build_tree(root)
-    scanner = cakewalk(str(tmp_path / "cache.db"))
+    scanner = _select_reader(cakewalk(str(tmp_path / "cache.db")), flavour)
     scanner.start_scan(root)
-    if reader_name == "_BlockReader":
-        scanner._dir_blocks_available = False
-
-    made = []
-    original = getattr(cw, reader_name)
-
-    class Probe(original):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            made.append(self)
-
-    monkeypatch.setattr(cw, reader_name, Probe)
+    made = _probe(monkeypatch, attr)
 
     try:
         list(scanner.walk(root, validate="none"))
-        assert made, f"{reader_name} was not used at all"
-        # One execute is needed to start the cursor; anything beyond that is a re-seek.
+        assert made, f"{attr} was not used at all"
+        # One query is needed to start the stream; anything beyond that is a re-seek.
         assert made[-1].seeks == 1
 
         made.clear()
@@ -155,33 +177,39 @@ def test_unpruned_walk_never_reseeks(tmp_path, monkeypatch, reader_name):
         scanner.close()
 
 
-def test_pruning_everything_costs_one_seek(tmp_path, monkeypatch):
-    """Dropping every subdirectory of a node must not cost a seek per sibling."""
+@pytest.mark.parametrize("which", ["native", "dir_blocks"])
+@pytest.mark.parametrize("fanout", [3, 40])
+def test_pruning_everything_costs_a_constant_number_of_seeks(
+    tmp_path, monkeypatch, which, fanout
+):
+    """Dropping every subdirectory of a node must not cost a seek per sibling.
+
+    The naive implementation seeks past each pruned subtree in turn, which is one query
+    per sibling. Because a directory's whole subtree is a contiguous run of rows, the
+    reader can retire the parent instead -- so the count must not move with `fanout`.
+    """
+    attr, flavour = SEEK_COUNTERS[which]
     root = str(tmp_path / "tree")
     os.makedirs(root)
-    build_tree(root)
-    scanner = cakewalk(str(tmp_path / "cache.db"))
+    for i in range(fanout):
+        os.makedirs(os.path.join(root, f"sub{i:03d}", "nested"))
+        with open(os.path.join(root, f"sub{i:03d}", "inner.txt"), "w") as fh:
+            fh.write("x")
+    with open(os.path.join(root, "top.txt"), "w") as fh:
+        fh.write("x")
+
+    scanner = _select_reader(cakewalk(str(tmp_path / "cache.db")), flavour)
     scanner.start_scan(root)
-
-    made = []
-    original = cw._DirBlockReader
-
-    class Probe(original):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            made.append(self)
-
-    monkeypatch.setattr(cw, "_DirBlockReader", Probe)
+    made = _probe(monkeypatch, attr)
 
     try:
         out = []
         for dirpath, dirnames, filenames in scanner.walk(root, validate="none"):
             out.append((os.path.relpath(dirpath, root), sorted(filenames)))
             dirnames[:] = []
-        assert out == [(".", sorted(["top.txt", "another.txt", ".dotfile"]))]
-        # The root's five subdirectories are one contiguous run of rows; skipping them is
-        # one seek past the parent's subtree, not one per subdirectory.
-        assert made[-1].seeks == 2
+        assert out == [(".", ["top.txt"])]
+        # One query to start the stream, at most one to resume past the pruned run.
+        assert made[-1].seeks <= 2
     finally:
         scanner.close()
 

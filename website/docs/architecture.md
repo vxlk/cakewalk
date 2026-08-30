@@ -111,6 +111,16 @@ Memory is `O(depth)`: only the ancestors of the current directory are held. A fu
 
 `topdown=False` uses the same single forward scan, holding each directory's tuple until its subtree has been emitted. Pruning has no effect there, which is also `os.walk`'s behaviour.
 
+### Reading it from Rust
+
+The projection removes most of the boundary crossings. What is left is the cost of the crossings that remain — `sqlite3` charges roughly 470 ns per row plus 215 ns per column value, and a walk needs six columns — so the reader also exists as a native `DirBlockWalk` iterator.
+
+It steps the rows with rusqlite and builds each name as a `PyString` straight from the packed blob it is reading out of SQLite's own buffer: no per-row tuple, and no intermediate whole-blob `str` that is split and then thrown away. It reconstructs paths and handles pruning in Rust, with the same one-seek-per-pruned-run behaviour.
+
+It is worth **1.21x** on top of the Python reader, and 1.13x–1.52x across tree shapes from 36 thousand to 5 million nodes. That is a good deal less than removing the `sqlite3` module from the hot path might suggest, and the reason is the object floor: at 334 ns/node the reader is only about 3.5x above the ~95 ns/name cost of the Python strings themselves, and no reader can go below that.
+
+The Python reader stays as the reference implementation and the fallback for an extension built before the native one existed. Both are driven by the same test suite, including the property tests, so neither can drift.
+
 ### The older reader
 
 An index written before `dir_blocks` existed still walks correctly, through `fs_nodes` directly:

@@ -25,13 +25,13 @@ Measured on `%LOCALAPPDATA%\Programs` (92,365 nodes, 11,347 directories, 4.11 Gi
 
 | question | `os.walk` | `cakewalk.walk` | SQL | SQL vs `os.walk` |
 |---|---:|---:|---:|---:|
-| total size of the tree | 6094.3 ms | — | 8.80 ms | 693x |
-| every `*.dll` beneath it | 929.6 ms | 35.8 ms | 13.56 ms | 69x |
-| 20 largest files | 6035.5 ms | — | 10.73 ms | 562x |
-| count and bytes by extension | 1075.9 ms | — | 65.49 ms | 16x |
-| total size, via [`du()`](./api.md#du) | 6027.2 ms | — | 0.019 ms | 311,737x |
+| total size of the tree | 6810.6 ms | — | 9.94 ms | 685x |
+| every `*.dll` beneath it | 1100.5 ms | 35.1 ms | 14.99 ms | 73x |
+| 20 largest files | 7184.1 ms | — | 13.34 ms | 539x |
+| count and bytes by extension | 1271.4 ms | — | 70.74 ms | 18x |
+| total size, via [`du()`](./api.md#du) | 6933.0 ms | — | 0.025 ms | 278,322x |
 
-The `*.dll` row is the fair comparison: neither side calls `stat()`, so both are doing the same thing with names. `cakewalk.walk` is 26x faster than `os.walk`; the query is 69x. That gap is not clever SQL. It is 92,365 Python strings versus one integer.
+The `*.dll` row is the fair comparison: neither side calls `stat()`, so both are doing the same thing with names. `cakewalk.walk` is 31x faster than `os.walk`; the query is 73x. That gap is not clever SQL. It is 92,365 Python strings versus one integer.
 
 The three rows that call `stat()` flatter the index for a reason worth naming: `os.walk` gives you names and nothing else, so anything about *size* costs a syscall per file. The index already has it.
 

@@ -55,7 +55,7 @@ There is a [Performance](./performance.md) page with measurements, and it is del
 
 - Against a warm `os.walk` on a local disk, `walk()` is about **30x** faster.
 - The contiguous-block layout accounts for about **2.5x** of that, consistently from 8.6k to 4.7M nodes.
-- Queries against the index are **16x to 693x** faster than `os.walk`, and `du()` is faster still, because they never build a Python object per node. This is the larger effect by a wide margin.
+- Queries against the index are **18x to 685x** faster than `os.walk`, and `du()` is faster still, because they never build a Python object per node. This is the larger effect by a wide margin.
 - The layout's *real* benefit — turning scattered reads into one sequential pass — does not appear in any warm benchmark, and we have not measured it end to end on cold spinning media. It is a mechanism with measured seek counts behind it, not a benchmark result.
 
 ## Next
