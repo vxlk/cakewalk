@@ -190,6 +190,20 @@ Scan memory is proportional to the number of *directories*, so indexing a very l
 
 ## Reproducing
 
+Every table on this page comes from one of two scripts in the repository:
+
+```bash
+python benchmarks/compare_walkers.py     # "Against other walkers"
+python benchmarks/reader_bench.py        # "Walk speed", "Querying the index", "Memory"
+```
+
+Both build a throwaway index in your temp directory and read a real tree; neither writes to
+the tree it walks. `compare_walkers.py` picks up `scandir-rs` if it is installed and skips
+it otherwise. See
+[`benchmarks/README.md`](https://github.com/vxlk/cakewalk/tree/master/benchmarks) for what
+they do that a naive benchmark does not — chiefly that they check the walkers agree on the
+tree's contents before comparing their speed, and abort if they do not.
+
 ```bash
 python -m pytest tests/
 ```

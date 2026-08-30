@@ -269,3 +269,15 @@ Run the tests with:
 ```bash
 python -m pytest tests/
 ```
+
+## Benchmarks
+
+Every performance figure above is produced by a script in [`benchmarks/`](benchmarks/):
+
+```bash
+python benchmarks/compare_walkers.py     # the table above, against other walkers
+python benchmarks/reader_bench.py        # cakewalk's own readers, SQL, index size
+```
+
+They build a throwaway index in your temp directory and read a real tree, and they check
+that the walkers agree on what is in that tree before comparing how fast they read it.
