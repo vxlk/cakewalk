@@ -10,7 +10,7 @@ sidebar_position: 5
 
 ## Why the query wins, and by how much
 
-The reason is structural rather than a matter of tuning. Decomposing `cakewalk.walk()` on a 4.7-million-node index, warm:
+The reason is structural rather than a matter of tuning. Decomposing the older `fs_nodes` reader on a 4.7-million-node index, warm:
 
 | | time | share |
 |---|---:|---:|
@@ -21,17 +21,17 @@ The reason is structural rather than a matter of tuning. Decomposing `cakewalk.w
 
 The database does none of the work. Nearly all of the time is spent turning rows into Python objects, and a walk has no choice: `os.walk`'s contract is a list of names, so five million names is five million string objects. A query that ends in `sum()`, `count()` or `LIMIT 20` never builds them — SQLite does the work in C and hands back one row.
 
-Measured on `%LOCALAPPDATA%\Programs` (81,018 files, 11,346 directories, 4.11 GiB), warm page cache:
+Measured on `%LOCALAPPDATA%\Programs` (92,365 nodes, 11,347 directories, 4.11 GiB), warm page cache, in the same process as the reader timings on the [performance page](./performance.md#walk-speed):
 
 | question | `os.walk` | `cakewalk.walk` | SQL | SQL vs `os.walk` |
 |---|---:|---:|---:|---:|
-| total size of the tree | 9715.1 ms | — | 10.9 ms | 895x |
-| every `*.dll` beneath it | 1480.9 ms | 321.7 ms | 21.9 ms | 68x |
-| 20 largest files | 10854.8 ms | — | 18.2 ms | 596x |
-| count and bytes by extension | 1586.4 ms | — | 85.6 ms | 19x |
-| total size, via [`du()`](./api.md#du) | 9715.1 ms | — | 0.03 ms | 325,000x |
+| total size of the tree | 6094.3 ms | — | 8.80 ms | 693x |
+| every `*.dll` beneath it | 929.6 ms | 35.8 ms | 13.56 ms | 69x |
+| 20 largest files | 6035.5 ms | — | 10.73 ms | 562x |
+| count and bytes by extension | 1075.9 ms | — | 65.49 ms | 16x |
+| total size, via [`du()`](./api.md#du) | 6027.2 ms | — | 0.019 ms | 311,737x |
 
-The `*.dll` row is the fair comparison: neither side calls `stat()`, so both are doing the same thing with names. `cakewalk.walk` is 4.6x faster than `os.walk`; the query is 68x. That gap is not clever SQL. It is 92,365 Python strings versus one integer.
+The `*.dll` row is the fair comparison: neither side calls `stat()`, so both are doing the same thing with names. `cakewalk.walk` is 26x faster than `os.walk`; the query is 69x. That gap is not clever SQL. It is 92,365 Python strings versus one integer.
 
 The three rows that call `stat()` flatter the index for a reason worth naming: `os.walk` gives you names and nothing else, so anything about *size* costs a syscall per file. The index already has it.
 
@@ -133,6 +133,8 @@ CREATE TABLE scan_meta (
 | `subtree_last` | highest id in this subtree; with `child_start`, the descendant range |
 
 One index can hold **many roots**. Filter by a subtree range, or by `parent_id IS NULL` to list them.
+
+There is a second table, `dir_blocks` — one row per directory with child names packed into NUL-joined strings, which is what [`walk()` reads](./architecture.md#dir_blocks-the-walk-projection). It is a derived projection, rebuilt from `fs_nodes` on every relayout. Query `fs_nodes`; it is the source of truth and the only one with sizes, hashes and mtimes.
 
 :::warning
 Row ids are not stable across scans. Any change to the tree triggers a full relayout and every id is reassigned. Do not store them; resolve to a path first.

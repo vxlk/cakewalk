@@ -32,6 +32,16 @@ Walking is unaffected — that side is `O(depth × fanout)` and stays in the kil
 
 If your tree relies on symlinks, results will differ from `os.walk(followlinks=True)`.
 
+## Sibling order can differ from `os.walk`
+
+Entries within one directory are ordered by SQLite's `BINARY` collation over UTF-8. `os.walk` returns `os.scandir` order, which on NTFS is UTF-16 code-unit order.
+
+These agree for ASCII and for most text. They disagree when a directory holds **both** a non-BMP name and a name in U+E000–U+FFFF: `U+1F600` is a surrogate pair starting `0xD83D`, so NTFS sorts it before `U+FF21`, while UTF-8 sorts it after. Because descent follows sibling order, this also reorders the *sequence of directories* a walk yields.
+
+Neither side promises an order — CPython documents none for `os.walk`, and on ext4 it is hash order — so this is a divergence rather than a bug. But if you are diffing cakewalk's output against `os.walk`'s, sort before comparing.
+
+The contents are always identical, and the topdown/bottom-up guarantee always holds: a directory is yielded before all of its descendants, or after all of them.
+
 ## Row ids are not stable
 
 Any change to the tree triggers a full relayout, and every row id is reassigned. Do not store cakewalk ids and expect them to mean anything after a rescan.
@@ -54,9 +64,11 @@ On a cache miss, cakewalk normally falls back to a parallel `jwalk` sweep. Suppl
 
 `update_cache(None)` enumerates mapped drive letters, which is meaningless elsewhere. Directory mtimes are truncated to whole seconds to work around NTFS lazy flushing. The test suite is Windows-oriented. Linux and macOS build and pass, but have had less exercise.
 
-## Not a search index
+## Not a content index
 
-cakewalk indexes structure — names, sizes, mtimes, hierarchy. It does not index file contents, and there is no query language. It is `os.walk`, faster, plus `du()`.
+cakewalk indexes structure — names, sizes, mtimes, hierarchy. It does not index file contents.
+
+There *is* a query language, though: the index is [a SQLite database you can query directly](./sql.md), and for aggregates and filters that is far faster than walking.
 
 ## Compared to Voidtools Everything
 

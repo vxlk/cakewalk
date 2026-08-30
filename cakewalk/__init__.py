@@ -104,11 +104,50 @@ class _BlockReader:
         self._cursor.close()
 
 
+#: One row per directory rather than per node, with child names arriving as two packed
+#: strings. Six values cross the sqlite3 boundary per *directory* instead of four per
+#: *child*, and `str.split` builds the name lists in C.
+_DIR_BLOCK_SQL = (
+    "SELECT parent, name, dnames, fnames, dfs, subtree_end FROM dir_blocks "
+    "WHERE dfs BETWEEN ? AND ? ORDER BY dfs"
+)
+
+_NUL = '\0'
+
+
+class _DirBlockReader:
+    """Reads directories out of the walk projection on one forward-moving cursor.
+
+    Rows are stored in depth-first pre-order and keyed by that order, so an unpruned walk
+    consumes the table as a single sequential scan. Pruning is the only thing that breaks
+    the sequence, and it is handled by restarting the cursor past the skipped subtree
+    rather than streaming rows that are about to be discarded.
+    """
+
+    __slots__ = ('_cursor', '_hi', 'seeks')
+
+    def __init__(self, conn, hi):
+        self._cursor = conn.cursor()
+        self._cursor.arraysize = 512
+        self._hi = hi
+        #: Number of cursor restarts. One for an unpruned walk.
+        self.seeks = 0
+
+    def stream(self, lo):
+        self._cursor.execute(_DIR_BLOCK_SQL, (lo, self._hi))
+        self.seeks += 1
+        return self._cursor
+
+    def close(self):
+        self._cursor.close()
+
+
 class cakewalk:
     def __init__(self, db_location: str):
         self.db_location = db_location
         self.conn = None
         self._blocks_available = None
+        self._dir_blocks_available = None
 
     def start_scan(self, root: Optional[str] = None, background: bool = False):
         if root:
@@ -201,6 +240,114 @@ class cakewalk:
                 cols = set()
             self._blocks_available = {'child_start', 'child_end', 'subtree_last'} <= cols
         return self._blocks_available
+
+    def _has_dir_blocks(self):
+        """Whether this database carries the walk projection.
+
+        A capability check rather than a version gate: an index without it still reads
+        correctly through fs_nodes, just more slowly, and the next scan builds it.
+        """
+        if self._dir_blocks_available is None:
+            try:
+                row = self._get_conn().execute(
+                    "SELECT count(*) FROM dir_blocks"
+                ).fetchone()
+                self._dir_blocks_available = bool(row and row[0])
+            except sqlite3.Error:
+                self._dir_blocks_available = False
+        return self._dir_blocks_available
+
+    def _dir_block_extent(self, node_id):
+        """``(dfs, subtree_end)`` -- where this directory's rows start and stop."""
+        return self._get_conn().execute(
+            "SELECT dfs, subtree_end FROM dir_blocks WHERE node_id = ?", (node_id,)
+        ).fetchone()
+
+    def _walk_dir_blocks_topdown(self, top, start, end, reader):
+        """Stream a topdown walk out of the projection.
+
+        Rows arrive in exactly the order they are yielded, so the body is one pass with no
+        lookahead: split two strings, hand out the tuple, push a frame. The only state is
+        the chain of ancestors, so memory is O(depth).
+        """
+        sep = os.sep
+        # frame: [dfs, path, kept, subtree_end]. `kept` stays None until the caller prunes,
+        # which keeps the unpruned path free of set lookups.
+        stack = []
+        resume = start
+        while resume is not None:
+            rows = reader.stream(resume)
+            resume = None
+            for parent, name, dnames, fnames, dfs, subtree_end in rows:
+                if stack:
+                    while stack[-1][0] != parent:
+                        stack.pop()
+                    frame = stack[-1]
+                    kept = frame[2]
+                    if kept is not None:
+                        if not kept:
+                            # Every subdirectory of this parent has been either walked or
+                            # pruned, so the rest of its subtree is dead. One seek clears
+                            # all of it, however many siblings remain.
+                            resume = frame[3] + 1
+                            stack.pop()
+                            break
+                        if name not in kept:
+                            resume = subtree_end + 1
+                            break
+                        kept.discard(name)
+                    path = frame[1] + sep + name
+                else:
+                    path = top
+
+                dirnames = dnames.split(_NUL) if dnames else []
+                filenames = fnames.split(_NUL) if fnames else []
+                count = len(dirnames)
+
+                yield path, dirnames, filenames
+
+                # os.walk contract: the caller may prune dirnames in place after the yield.
+                if count:
+                    stack.append([
+                        dfs,
+                        path,
+                        None if len(dirnames) == count else set(dirnames),
+                        subtree_end,
+                    ])
+
+    def _walk_dir_blocks_bottomup(self, top, start, end, reader):
+        """Same single pass, held one subtree deep so children are yielded first.
+
+        Bottom-up cannot prune -- by the time a directory is handed to the caller its
+        children have already been walked -- which is exactly `os.walk`'s behaviour.
+        """
+        sep = os.sep
+        stack = []      # [dfs, path, dirnames, filenames]
+        for parent, name, dnames, fnames, dfs, _end in reader.stream(start):
+            while stack and stack[-1][0] != parent:
+                frame = stack.pop()
+                yield frame[1], frame[2], frame[3]
+            path = (stack[-1][1] + sep + name) if stack else top
+            stack.append([
+                dfs,
+                path,
+                dnames.split(_NUL) if dnames else [],
+                fnames.split(_NUL) if fnames else [],
+            ])
+        while stack:
+            frame = stack.pop()
+            yield frame[1], frame[2], frame[3]
+
+    def _walk_dir_blocks(self, top, extent, topdown):
+        start, end = extent
+        reader = _DirBlockReader(self._get_conn(), end)
+        try:
+            if topdown:
+                yield from self._walk_dir_blocks_topdown(top, start, end, reader)
+            else:
+                yield from self._walk_dir_blocks_bottomup(top, start, end, reader)
+        finally:
+            reader.close()
 
     def _block_extent(self, node_id):
         row = self._get_conn().execute(
@@ -333,15 +480,24 @@ class cakewalk:
 
         per_dir = validate == VALIDATE_FULL
 
-        # The fast path. VALIDATE_FULL is deliberately excluded: it stats every directory as
-        # it goes, so it is bounded by syscalls rather than by query cost, and it needs to
-        # be able to drop into a live os.walk part-way down -- neither of which the single
-        # forward cursor is built for.
-        if not per_dir and self._has_blocks():
-            extent = self._block_extent(node_id)
-            if extent is not None:
-                yield from self._walk_blocks(top, extent, topdown)
-                return
+        # The fast paths. VALIDATE_FULL is deliberately excluded from both: it stats every
+        # directory as it goes, so it is bounded by syscalls rather than by query cost, and
+        # it needs to be able to drop into a live os.walk part-way down -- neither of which
+        # a single forward cursor is built for.
+        if not per_dir:
+            # Preferred: one row per directory, names packed. Roughly 4x the fs_nodes
+            # block reader, and a quarter of the bytes read off disk.
+            if self._has_dir_blocks():
+                extent = self._dir_block_extent(node_id)
+                if extent is not None:
+                    yield from self._walk_dir_blocks(top, extent, topdown)
+                    return
+            # Fallback for an index written before the projection existed.
+            if self._has_blocks():
+                extent = self._block_extent(node_id)
+                if extent is not None:
+                    yield from self._walk_blocks(top, extent, topdown)
+                    return
 
         cursor = self._get_conn().cursor()
 

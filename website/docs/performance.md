@@ -10,21 +10,41 @@ All figures below were measured on one Windows machine with a local SSD. They ar
 
 ## The headline is not `walk()`
 
-`walk()` is about 6x faster than `os.walk`. Queries against the same index are 19x to 895x faster, and `du()` is faster still. The rest of this page explains both, but if you only read one table, read [this one](./sql.md#why-the-query-wins-and-by-how-much).
+`walk()` is about 30x faster than `os.walk`. Queries against the same index are 16x to 693x faster, and `du()` is faster still. The rest of this page explains both, but if you only read one table, read [this one](./sql.md#why-the-query-wins-and-by-how-much).
 
 The asymmetry is structural. `walk()` must return a Python string for every name in the tree; a query that ends in `sum()` or `LIMIT 20` returns one row. See [Where the time goes](#where-the-time-goes) below — the database contributes essentially nothing to `walk()`'s cost, so no amount of query tuning will close that gap.
 
+## Memory and the object floor
+
+Producing N Python strings from data already in RAM costs about **95 ns each** on this machine, and that is the floor for any `os.walk`-shaped API. Two things follow, both measured:
+
+- Handing back `bytes` instead of `str` costs 84 ns — a 12% saving, not a multiple. The allocation dominates, so changing the object *type* is not a lever.
+- Not materialising at all costs 5 ns. That is the only large saving available, and it is why an aggregate answered in SQL is 100x rather than 5x.
+
+The current reader runs at 679 ns/node against a ~95 ns/name floor, so roughly 7x of headroom remains — most of it the `sqlite3` module's per-row overhead, which is not reachable from Python.
+
 ## Walk speed
 
-36,527 nodes (4,270 directories, 32,256 files), warm OS page cache:
+A real index of 92,365 nodes (11,347 directories, 4.11 GiB), warm OS page cache. All three readers were checked to produce byte-identical output before timing:
+
+| reader | time | ns/node | vs `os.walk` | vs previous |
+|---|---:|---:|---:|---:|
+| `os.walk` | 1981.7 ms | 21455 | 1.00x | |
+| seek per directory | 447.0 ms | 4839 | 4.43x | 4.43x |
+| `fs_nodes` block layout | 266.2 ms | 2882 | 7.44x | 1.68x |
+| `dir_blocks` projection | **62.7 ms** | **679** | **31.60x** | **4.24x** |
+
+Each row is a design cakewalk actually shipped, so the deltas isolate what each change bought. The last one — [one row per directory with names packed](./architecture.md#dir_blocks-the-walk-projection) — is the largest, and for the reason the [decomposition](#where-the-time-goes) predicts: it removes boundary crossings rather than making queries smarter.
+
+`topdown=False` costs the same: 60.2 ms against the `fs_nodes` reader's 256.9 ms.
+
+An older measurement on a 36,527-node tree, kept because it isolates the block layout on its own:
 
 | | time | vs `os.walk` |
 |---|---:|---:|
 | `os.walk` | 395.1 ms | 1.00x |
 | `cakewalk.walk`, seek-per-directory index | 117.3 ms | 3.37x |
 | `cakewalk.walk`, block layout | 62.2 ms | **6.35x** |
-
-The middle row is cakewalk's own previous design — one query per directory against the same data — so the last row isolates what the [contiguous-block layout](./architecture.md) is worth: **1.89x** on top of an already-working cache.
 
 Smaller tree, 13,871 nodes, showing the validate modes:
 
@@ -112,12 +132,13 @@ That last number is the one to attack if `walk()` is to get materially faster, a
 | | |
 |---|---|
 | Peak Python objects, full walk of 2,110 directories | 13.6 KiB |
-| Index size | ~76 bytes/node |
-| Index at 50M nodes | ~3.5 GiB |
+| Index without `dir_blocks` | 99.0 bytes/node |
+| Index with `dir_blocks` | 121.8 bytes/node (**+23%**) |
+| Index at 50M nodes | ~5.7 GiB |
 
-Walk memory is `O(depth × fanout)` — the directories on the current path — not `O(tree)`. It does not grow with tree size.
+Walk memory is `O(depth)` — the ancestors of the current directory — not `O(tree)`. It does not grow with tree size.
 
-The layout columns account for about 8% of index size.
+Both measured on a real 92,365-node tree with real filenames. The layout columns account for about 8%; the projection duplicates every name in the tree, which is where the other 23% goes. In exchange, a walk reads **2.6x fewer bytes**: 2.01 MiB of `dir_blocks` instead of 5.25 MiB of `fs_nodes`.
 
 ## Scan cost
 

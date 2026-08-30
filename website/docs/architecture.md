@@ -66,28 +66,67 @@ With plain depth-first node ordering, a directory's immediate children are sprea
 
 Grouping children into contiguous blocks fixes exactly this. One block read gives the complete listing, so the yield can happen before the descent, and a caller who prunes causes the reader to **seek past a contiguous run of blocks** rather than stream rows it is going to throw away. On a multi-terabyte tree that distinction is the whole value of pruning.
 
+## `dir_blocks`: the walk projection
+
+Laying the nodes out well removes the seeks, but not the *boundary crossings*. `fs_nodes` has one row per node, so walking five million nodes means five million rows and twenty million column values crossing into Python — measured at roughly 470 ns per row plus 215 ns per value, which is where essentially all of a walk's time goes.
+
+So the relayout writes a second table shaped for exactly one job:
+
+```sql
+CREATE TABLE dir_blocks (
+    dfs          INTEGER PRIMARY KEY,   -- depth-first pre-order = walk order
+    node_id      INTEGER NOT NULL,      -- the fs_nodes row this describes
+    parent       INTEGER NOT NULL,      -- dfs of the parent, -1 for a root
+    name         TEXT NOT NULL,
+    dnames       TEXT NOT NULL,         -- child directory names, NUL-joined
+    fnames       TEXT NOT NULL,         -- child file names, NUL-joined
+    subtree_end  INTEGER NOT NULL       -- highest dfs in this subtree
+);
+```
+
+One row per **directory**, with the children's names packed into two strings that are already partitioned into dirs and files. Three things follow:
+
+1. **The boundary is crossed once per directory, not once per node.** On a tree that is 15% directories, that is roughly six times fewer rows.
+2. **The name lists are built in C.** `dnames.split('\0')` is one call that produces the whole `dirnames` list; the previous reader ran a Python loop with an `is_dir` branch and two appends per child.
+3. **`dfs` is the primary key**, so the table's physical order *is* the order a walk reads it. An unpruned walk is one forward scan.
+
+It is also far less to read. Pulling `name` out of `fs_nodes` drags the hash, the mtime and the rollups off the page with it whether or not the query asked for them; `dir_blocks` holds only what a walk uses. Measured at **2.6x fewer bytes** on a real 92,365-node index — which on cold media is the difference that matters most.
+
+`dir_blocks` is derived, not authoritative. `fs_nodes` remains the source of truth and the table [queries](./sql.md) run against.
+
 ## The reader
 
-`walk()` opens one cursor and moves it forward:
+```sql
+SELECT parent, name, dnames, fnames, dfs, subtree_end FROM dir_blocks
+WHERE dfs BETWEEN ? AND ? ORDER BY dfs
+```
+
+Rows arrive in exactly the order they are yielded, so the loop has no lookahead: split two strings, hand out the tuple, push a frame. Paths are reconstructed from a stack of ancestors — a row carries its parent's `dfs`, so the reader pops until the top of the stack matches.
+
+Pruning is the only thing that breaks the sequence. When a caller removes a name from `dirnames`, the reader restarts the cursor past that subtree's `subtree_end` rather than streaming rows it is about to discard. Once every kept subdirectory of a node has been walked, the remainder of that node's subtree is skipped in **one** seek regardless of how many siblings are left — so `dirs[:] = []` costs one seek, not one per subdirectory.
+
+An unpruned walk performs **zero re-seeks**, and there is a test asserting exactly that, because a regression there would change no results, only make everything slow again.
+
+Memory is `O(depth)`: only the ancestors of the current directory are held. A full walk of a 2,110-directory tree peaks at 13.6 KiB of Python objects.
+
+`topdown=False` uses the same single forward scan, holding each directory's tuple until its subtree has been emitted. Pruning has no effect there, which is also `os.walk`'s behaviour.
+
+### The older reader
+
+An index written before `dir_blocks` existed still walks correctly, through `fs_nodes` directly:
 
 ```sql
 SELECT name, is_dir, child_start, child_end FROM fs_nodes
 WHERE id BETWEEN ? AND ? ORDER BY id
 ```
 
-Four columns, not five — column count is close to the dominant cost in the `sqlite3` bridge (transfer scales from 6.06 ms at one column to 13.16 ms at four, for 8,169 rows), so the query carries exactly what a walk needs and nothing else. `last_modified` is absent because only `validate='full'` needs it, and that mode uses a different path.
-
-The reader tracks its position. If the next block it needs starts where the cursor already is, it keeps streaming. If not — which happens only when you prune — it re-issues the query from the new position. An unpruned walk performs **zero re-seeks**, and there is a test asserting exactly that, because a regression there would change no results, only make everything slow again.
-
-Memory is `O(depth × fanout)`: only the directories on the current path are held. A full walk of a 2,110-directory tree peaks at 13.6 KiB of Python objects.
-
-`topdown=False` uses the same forward scan. Blocks are still *read* depth-first, because that is how they are stored; only the moment each directory is handed to the caller changes.
+Four columns, not five — column count is close to the dominant cost in the `sqlite3` bridge (transfer scales from 6.06 ms at one column to 13.16 ms at four, for 8,169 rows). This path is about 4.6x slower than the projection but produces byte-identical output, and a rescan builds the projection and moves off it.
 
 ## Why the scan is allowed to be slow
 
 The relayout is a complete rewrite of the table, followed by a `VACUUM`. That is a deliberate trade: the scan side absorbs cost so the walk side does not have to.
 
-It only runs when something actually changed. The root Merkle hash covers the whole subtree, so if it is unchanged, no id can have moved and the existing layout is still correct — the relayout is skipped entirely.
+It only runs when something actually changed. The root Merkle hash covers the whole subtree, so if it is unchanged, no id can have moved and the existing layout is still correct — the relayout is skipped entirely. (One exception: an index that has no `dir_blocks` yet gets one rebuilt on the next scan even if nothing moved, since otherwise an upgraded cache would never reach the fast path.)
 
 When it does run, it streams in `O(depth × fanout)` memory rather than loading the tree, and the table swap happens inside the transaction so a failure cannot leave you with no cache.
 
@@ -103,4 +142,6 @@ It does **not** skip filesystem reads. `update_cache()` calls `read_dir` on ever
 
 ## Cost
 
-The layout columns add about 6 bytes per node. The index costs roughly **76 bytes per node** in total — about 3.5 GiB for 50 million nodes, up about 8% from the same schema without the layout.
+The layout columns add about 6 bytes per node. `dir_blocks` costs another **23%** of index size — measured at 99.0 → 121.8 bytes per node on a real 92,365-node tree — in exchange for a 4.6x faster walk that reads 2.6x fewer bytes.
+
+That trade is deliberate and it is not free: the projection duplicates every name in the tree. If index size matters more to you than walk speed, dropping the `dir_blocks` table leaves a working cache that reads through `fs_nodes` — though the next scan will rebuild it.

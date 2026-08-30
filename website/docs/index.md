@@ -19,7 +19,7 @@ for root, dirs, files in cakewalk.walk("D:\\share"):
     ...                                      # reads the index, not the disk
 ```
 
-If you already have code written against `os.walk`, that is a two-line change and about 6x faster. If you are willing to write a query instead, the same questions come back one to three orders of magnitude faster:
+If you already have code written against `os.walk`, that is a two-line change and about 30x faster. If you are willing to write a query instead, the same questions come back one to three orders of magnitude faster:
 
 ```python
 conn = cakewalk.connect()
@@ -44,8 +44,8 @@ That is not a different database — it is the same index `walk()` reads, and [Q
 Three things, in order:
 
 1. **[`update_cache()`](./getting-started.md)** sweeps the filesystem in parallel, hashes it into a Merkle tree, and writes a SQLite index — including size and count rollups for every directory.
-2. **A relayout pass** rewrites the table so each directory's children sit in one contiguous run of row ids. This is the part that makes reads fast, and it is explained in [Architecture](./architecture.md).
-3. **[`walk()`](./api.md#walk)** streams that layout on a single forward cursor: one query for the whole tree, memory proportional to depth rather than tree size. Or **[a query](./sql.md)** answers the same question without building a Python object per node at all.
+2. **A relayout pass** rewrites the table so each directory's children sit in one contiguous run of row ids, and writes `dir_blocks` — a projection with one row per *directory* and its children's names packed into two strings. Both are explained in [Architecture](./architecture.md).
+3. **[`walk()`](./api.md#walk)** streams that projection on a single forward cursor: one query for the whole tree, memory proportional to depth rather than tree size. Or **[a query](./sql.md)** answers the same question without building a Python object per node at all.
 
 The relayout has a second consequence worth knowing about: a directory's descendants end up as one contiguous id range, so "everything under this path" is a primary-key range scan rather than a recursive query.
 
@@ -53,9 +53,9 @@ The relayout has a second consequence worth knowing about: a directory's descend
 
 There is a [Performance](./performance.md) page with measurements, and it is deliberate about what was and was not measured. The short version:
 
-- Against a warm `os.walk` on a local disk, `walk()` is about **6x** faster.
+- Against a warm `os.walk` on a local disk, `walk()` is about **30x** faster.
 - The contiguous-block layout accounts for about **2.5x** of that, consistently from 8.6k to 4.7M nodes.
-- Queries against the index are **19x to 895x** faster than `os.walk`, and `du()` is faster still, because they never build a Python object per node. This is the larger effect by a wide margin.
+- Queries against the index are **16x to 693x** faster than `os.walk`, and `du()` is faster still, because they never build a Python object per node. This is the larger effect by a wide margin.
 - The layout's *real* benefit — turning scattered reads into one sequential pass — does not appear in any warm benchmark, and we have not measured it end to end on cold spinning media. It is a mechanism with measured seek counts behind it, not a benchmark result.
 
 ## Next

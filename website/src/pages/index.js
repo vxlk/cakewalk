@@ -60,10 +60,10 @@ export default function Home() {
               </p>
               <p>
                 <code>walk()</code> is the compatibility layer, and it is about
-                6x faster than <code>os.walk</code>. The index underneath it is
+                30x faster than <code>os.walk</code>. The index underneath it is
                 an ordinary SQLite database where a subtree is a contiguous id
                 range, and{' '}
-                <Link to="/docs/sql">querying it directly</Link> is 19x to 895x
+                <Link to="/docs/sql">querying it directly</Link> is 16x to 693x
                 faster — because an aggregate never builds a Python object per
                 file.
               </p>

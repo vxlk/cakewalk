@@ -7,7 +7,7 @@
 
 It is built for one job in particular: repeatedly asking questions about a very large tree — a multi-terabyte shared drive, a network mount, a spinning disk — where the filesystem itself is the bottleneck. You sweep it once, then read the index instead of the disk.
 
-If you already have code written against `os.walk`, `cakewalk.walk` is a two-line change and about 6x faster. If you are willing to write a query instead, the same questions are answered **one to three orders of magnitude** faster than that — see [Query the index directly](#query-the-index-directly).
+If you already have code written against `os.walk`, `cakewalk.walk` is a two-line change and about 30x faster. If you are willing to write a query instead, the same questions are answered **one to three orders of magnitude** faster than that — see [Query the index directly](#query-the-index-directly).
 
 📖 **[Full documentation](https://vxlk.github.io/cakewalk/)**
 
@@ -22,11 +22,13 @@ for root, dirs, files in cakewalk.walk("D:\\share"):
     ...                                      # reads the index, not the disk
 ```
 
-`update_cache()` walks the tree in parallel with `jwalk` and `rayon`, computes a bottom-up Merkle tree of `xxHash64` digests, and writes it to SQLite. It then rewrites the table so that **every directory's children occupy one contiguous range of row ids, with the blocks laid out depth-first**.
+`update_cache()` walks the tree in parallel with `jwalk` and `rayon`, computes a bottom-up Merkle tree of `xxHash64` digests, and writes it to SQLite. It then does two things that make reads fast.
 
-That last step is what makes reads fast. Row ids handed out by a parallel scan follow discovery order, which is scattered relative to walk order — measured at 0.141 backward page seeks per node. That costs nothing while the database fits in RAM and becomes the dominant cost when it does not. After the rewrite, a full walk reads the file strictly forward, so readahead works and the access pattern is sequential.
+**It rewrites the node table** so every directory's children occupy one contiguous range of row ids, with the blocks laid out depth-first. Row ids handed out by a parallel scan follow discovery order, which is scattered relative to walk order — measured at 0.141 backward page seeks per node. That costs nothing while the database fits in RAM and becomes the dominant cost when it does not. After the rewrite, a full walk reads the file strictly forward, so readahead works and the access pattern is sequential.
 
-`walk()` then streams that layout on a single forward-moving cursor: one query for the whole tree, `O(depth)` memory, and no re-seeks unless you prune.
+**It writes a second table, `dir_blocks`,** shaped for walking alone: one row per *directory*, with the children's names packed into two NUL-joined strings, keyed by depth-first pre-order so the table's physical order is walk order. `fs_nodes` has a row per node and twelve columns, and crossing that boundary — not the database — is where essentially all of a walk's time goes. One row per directory instead of one per node, with the name lists built by a single `str.split` in C, is worth **4.6x**. It also reads 2.6x fewer bytes off disk, since pulling `name` out of `fs_nodes` drags the hash, mtime and rollups along with it.
+
+`walk()` then streams `dir_blocks` on a single forward-moving cursor: one query for the whole tree, `O(depth)` memory, and no re-seeks unless you prune. `fs_nodes` stays the source of truth, and the table [queries](#query-the-index-directly) run against.
 
 If a path is not in the index, `walk()` falls back to a parallel `jwalk` sweep of the live filesystem, so it always returns correct results.
 
@@ -132,31 +134,34 @@ ORDER BY size DESC;
 
 ### What it is worth
 
-Measured on `%LOCALAPPDATA%\Programs` — 81,018 files, 11,346 directories, 4.11 GiB — warm page cache:
+Measured on the same index and in the same process as the table below — 92,365 nodes (11,347 directories), 4.11 GiB, warm page cache:
 
 | question | `os.walk` | `cakewalk.walk` | SQL | SQL vs `os.walk` |
 |---|---:|---:|---:|---:|
-| total size of the tree | 9715.1 ms | — | 10.9 ms | 895x |
-| every `*.dll` beneath it | 1480.9 ms | 321.7 ms | 21.9 ms | 68x |
-| 20 largest files | 10854.8 ms | — | 18.2 ms | 596x |
-| count and bytes by extension | 1586.4 ms | — | 85.6 ms | 19x |
-| total size, via `du()` rollup | 9715.1 ms | — | 0.03 ms | 325,000x |
+| total size of the tree | 6094.3 ms | — | 8.80 ms | 693x |
+| every `*.dll` beneath it | 929.6 ms | 35.8 ms | 13.56 ms | 69x |
+| 20 largest files | 6035.5 ms | — | 10.73 ms | 562x |
+| count and bytes by extension | 1075.9 ms | — | 65.49 ms | 16x |
+| total size, via `du()` rollup | 6027.2 ms | — | 0.019 ms | 311,737x |
 
-The `*.dll` row is the honest apples-to-apples one: no `stat()` calls on either side, just names. `cakewalk.walk` is 4.6x faster than `os.walk` there; the query is 68x. The gap is not query cleverness — it is that the walk materialises 92,365 Python strings and the query materialises one integer.
+The `*.dll` row is the honest apples-to-apples one: no `stat()` calls on either side, just names. `cakewalk.walk` is 26x faster than `os.walk` there; the query is 69x. The gap is not query cleverness — it is that the walk materialises 92,365 Python strings and the query materialises one integer.
 
 `du()` is the extreme case, and the reason to reach for the rollups before writing anything: the answer was computed during the scan.
 
 ## Performance
 
-Measured on a 36,527-node tree, warm OS page cache, on the same machine:
+Measured on a real 92,365-node index (11,347 directories, 4.11 GiB), warm OS page cache. All three readers were checked to produce byte-identical output before timing:
 
-| | time | vs `os.walk` |
-|---|---:|---:|
-| `os.walk` | 395.1 ms | 1.00x |
-| `cakewalk.walk`, seek-per-directory index | 117.3 ms | 3.37x |
-| `cakewalk.walk`, block layout | 62.2 ms | 6.35x |
+| reader | time | ns/node | vs `os.walk` | vs previous |
+|---|---:|---:|---:|---:|
+| `os.walk` | 1981.7 ms | 21455 | 1.00x | |
+| seek per directory | 447.0 ms | 4839 | 4.43x | 4.43x |
+| `fs_nodes` block layout | 266.2 ms | 2882 | 7.44x | 1.68x |
+| `dir_blocks` projection | **62.7 ms** | **679** | **31.60x** | **4.24x** |
 
-The index costs about **76 bytes per node** — roughly 3.5 GiB for 50 million nodes — and a full walk holds a few KiB of Python objects regardless of tree size.
+Each row is a design cakewalk actually shipped, so the deltas isolate what each change bought. `topdown=False` costs the same: 60.2 ms against 256.9 ms.
+
+The index costs about **122 bytes per node** — 99 without `dir_blocks`, so the projection is +23% — and a full walk holds a few KiB of Python objects regardless of tree size.
 
 Be aware of what these numbers are and are not. Every row above reads from RAM, so they measure query and CPU cost only; the block layout is worth about 2.5x there, consistently from 8.6k to 4.7M nodes. The reason the layout matters far more than that on a real shared drive is the seek behaviour, which does not show up in a warm benchmark at all: 0.112 backward page seeks per node becomes 0.000. On a 20M-node index that will not fit in RAM, that is the difference between millions of scattered reads and one sequential pass — but we have not measured that end to end on cold spinning media, and you should treat it as a mechanism, not a benchmark.
 
@@ -164,7 +169,7 @@ Be aware of what these numbers are and are not. Every row above reads from RAM, 
 
 ### Where `walk()` spends its time
 
-Decomposed on a 4.7-million-node index, warm:
+Decomposed on a 4.7-million-node index against the `fs_nodes` reader:
 
 | | time | share |
 |---|---:|---:|
@@ -173,7 +178,9 @@ Decomposed on a 4.7-million-node index, warm:
 | unpacking and the dir/file branch | 167.0 ms | 1.3% |
 | building lists, joining paths, yielding tuples | 5942.8 ms | 48.0% |
 
-The database is free. Essentially all of the time is spent turning rows into Python objects — which is why a query that avoids building them wins so heavily, and why [`du()`](#rollups) wins by five orders of magnitude.
+The database is free. Essentially all of the time is spent turning rows into Python objects — which is what `dir_blocks` attacks, by crossing the boundary once per directory instead of once per node, and which is why a query that avoids building them entirely wins so heavily.
+
+The floor for producing N Python strings from data already in RAM is ~95 ns each. Returning `bytes` instead of `str` measures at 84 ns, so changing the object *type* saves 12%, not a multiple; not materialising at all costs 5 ns. That is why [`du()`](#rollups) wins by five orders of magnitude and `walk()` wins by one.
 
 ## Caveats
 
@@ -181,6 +188,7 @@ The database is free. Essentially all of the time is spent turning rows into Pyt
 - **The scan holds directory metadata in memory** proportional to the number of directories, so an extremely large tree needs real RAM to index. Walking is unaffected.
 - **Symlinks are not followed.** `followlinks` is accepted for signature compatibility and ignored.
 - **Row ids are not stable.** Any change to the tree triggers a full relayout, and ids are reassigned.
+- **Sibling order can differ from `os.walk`.** Entries are ordered by SQLite's `BINARY` collation over UTF-8; `os.scandir` on NTFS uses UTF-16 code-unit order. These disagree only when a directory holds both a non-BMP name and one in U+E000-U+FFFF. Neither side promises an order, but sort before diffing.
 
 ## Usage
 
