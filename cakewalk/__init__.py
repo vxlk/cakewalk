@@ -392,6 +392,84 @@ class cakewalk:
                 for child_id, name, child_mtime in reversed(dirs):
                     stack.append((os.path.join(path, name), child_id, child_mtime, False))
 
+    def connect(self):
+        """A read-only :mod:`sqlite3` connection to the index.
+
+        The index is an ordinary SQLite database and the schema is documented, so
+        anything you can express in SQL you can ask of it directly. That is usually the
+        better tool: an aggregate answered inside SQLite never materialises a Python
+        object per node, which is the dominant cost of :meth:`walk`.
+
+        Read-only by URI, so a query cannot corrupt the cache or block a scan.
+        """
+        if not os.path.exists(self.db_location):
+            raise FileNotFoundError(
+                f"Database not found at {self.db_location}. Call start_scan() first."
+            )
+        uri = 'file:{}?mode=ro'.format(
+            os.path.abspath(self.db_location).replace('?', '%3f').replace('#', '%23')
+        )
+        conn = sqlite3.connect(uri, uri=True)
+        conn.execute("PRAGMA cache_size = -64000;")
+        return conn
+
+    def subtree_range(self, path: str):
+        """``(lo, hi)`` id range holding everything *beneath* ``path``.
+
+        The relayout gives every directory's descendants one contiguous run of row ids,
+        so a whole-subtree question is a range scan over the primary key rather than a
+        recursive CTE::
+
+            lo, hi = scanner.subtree_range(r"D:\\share\\projects")
+            conn.execute(
+                "SELECT sum(size) FROM fs_nodes WHERE id BETWEEN ? AND ? AND is_dir = 0",
+                (lo, hi),
+            )
+
+        ``path`` itself is *not* in the range -- its own rollups are on its row, and
+        :meth:`du` returns them. A directory with no children yields ``(0, -1)``, which
+        matches nothing, so callers do not need to special-case it.
+
+        Returns None if ``path`` is not indexed, or if the index predates the layout.
+        """
+        if not self._has_blocks():
+            return None
+        conn = self._get_conn()
+        node_id = self._get_node_id(conn.cursor(), path)
+        if node_id is None:
+            return None
+        row = conn.execute(
+            "SELECT child_start, subtree_last FROM fs_nodes WHERE id = ?", (node_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        child_start, subtree_last = row
+        # An empty directory carries child_start 0 / child_end -1; subtree_last is its own
+        # id, which would otherwise describe a range containing unrelated rows.
+        return (0, -1) if child_start == 0 else (child_start, subtree_last)
+
+    def path_of(self, node_id: int):
+        """Absolute path of a row id, or None if there is no such row.
+
+        Rows store only a name, so a query result is not usable as a path until it is
+        joined back up the tree. Costs one lookup per level.
+        """
+        conn = self._get_conn()
+        parts = []
+        current = node_id
+        while True:
+            row = conn.execute(
+                "SELECT parent_id, name FROM fs_nodes WHERE id = ?", (current,)
+            ).fetchone()
+            if row is None:
+                return None
+            parent_id, name = row
+            if parent_id is None:
+                # Root rows hold the full path they were scanned as.
+                return os.path.join(name, *reversed(parts)) if parts else name
+            parts.append(name)
+            current = parent_id
+
     def du(self, path: str):
         """Total bytes, file count and directory count beneath ``path``.
 
@@ -581,5 +659,41 @@ def cache_info(path: str):
     scanner = _get_default_scanner(path)
     try:
         return scanner.cache_info(os.path.abspath(path))
+    except (FileNotFoundError, sqlite3.Error):
+        return None
+
+
+def connect():
+    """A read-only :mod:`sqlite3` connection to the default index.
+
+    The index is a plain SQLite database with a documented schema. Questions about a
+    whole subtree -- total size, largest files, what changed, what matches a pattern --
+    are answered far faster in SQL than by walking, because the answer never becomes one
+    Python object per node. See :meth:`cakewalk.connect`.
+    """
+    return _get_default_scanner("ROOT").connect()
+
+
+def subtree_range(path: str):
+    """``(lo, hi)`` id range holding everything beneath ``path``, or None.
+
+    Lets a whole-subtree query be a primary-key range scan. See
+    :meth:`cakewalk.subtree_range`.
+    """
+    scanner = _get_default_scanner(path)
+    try:
+        return scanner.subtree_range(os.path.abspath(path))
+    except (FileNotFoundError, sqlite3.Error):
+        return None
+
+
+def path_of(node_id: int):
+    """Absolute path for a row id from a SQL result, or None.
+
+    See :meth:`cakewalk.path_of`.
+    """
+    scanner = _get_default_scanner("ROOT")
+    try:
+        return scanner.path_of(node_id)
     except (FileNotFoundError, sqlite3.Error):
         return None

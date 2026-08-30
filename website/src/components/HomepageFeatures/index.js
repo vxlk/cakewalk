@@ -20,17 +20,18 @@ const FeatureList = [
         Each directory&apos;s children sit in one contiguous run of rows, laid
         out depth-first. A full walk reads the index strictly forward — zero
         backward seeks — so readahead works even when the index is far larger
-        than RAM.
+        than RAM, and it holds only the directories on the current path.
       </>
     ),
   },
   {
-    title: 'Flat memory, free rollups',
+    title: 'Or skip the walk entirely',
     description: (
       <>
-        A walk holds only the directories on the current path: kilobytes, no
-        matter how large the tree. Sizes and file counts are rolled up during
-        the scan, so <code>du()</code> is a single lookup.
+        The index is a documented SQLite database, and a subtree is a
+        contiguous id range. Aggregates, rankings and filters answered in SQL
+        run 19x to 895x faster than <code>os.walk</code>, because they never
+        build a Python object per file.
       </>
     ),
   },

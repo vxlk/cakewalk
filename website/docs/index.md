@@ -6,9 +6,9 @@ sidebar_position: 1
 
 # cakewalk
 
-cakewalk is a drop-in replacement for `os.walk` and `os.scandir` backed by a SQLite index of your filesystem. It is a native extension built with Rust, PyO3, jwalk and SQLite.
+cakewalk indexes a filesystem into SQLite and gives you two ways to read it back: a drop-in replacement for `os.walk` and `os.scandir`, and the database itself. It is a native extension built with Rust, PyO3, jwalk and SQLite.
 
-It exists for one situation in particular: repeatedly walking a very large tree — a multi-terabyte shared drive, a network mount, a spinning disk — where the filesystem itself is the bottleneck. You sweep it once, then walk the index instead of the disk.
+It exists for one situation in particular: repeatedly asking questions about a very large tree — a multi-terabyte shared drive, a network mount, a spinning disk — where the filesystem itself is the bottleneck. You sweep it once, then read the index instead of the disk.
 
 ```python
 import cakewalk
@@ -18,6 +18,18 @@ cakewalk.update_cache("D:\\share")          # sweep the filesystem, build the in
 for root, dirs, files in cakewalk.walk("D:\\share"):
     ...                                      # reads the index, not the disk
 ```
+
+If you already have code written against `os.walk`, that is a two-line change and about 6x faster. If you are willing to write a query instead, the same questions come back one to three orders of magnitude faster:
+
+```python
+conn = cakewalk.connect()
+lo, hi = cakewalk.subtree_range("D:\\share")
+
+conn.execute("SELECT sum(size) FROM fs_nodes "
+             "WHERE id BETWEEN ? AND ? AND is_dir = 0", (lo, hi)).fetchone()
+```
+
+That is not a different database — it is the same index `walk()` reads, and [Querying the index](./sql.md) explains why the gap is so large.
 
 ## Is this the right tool?
 
@@ -33,14 +45,17 @@ Three things, in order:
 
 1. **[`update_cache()`](./getting-started.md)** sweeps the filesystem in parallel, hashes it into a Merkle tree, and writes a SQLite index — including size and count rollups for every directory.
 2. **A relayout pass** rewrites the table so each directory's children sit in one contiguous run of row ids. This is the part that makes reads fast, and it is explained in [Architecture](./architecture.md).
-3. **[`walk()`](./api.md#walk)** streams that layout on a single forward cursor: one query for the whole tree, memory proportional to depth rather than tree size.
+3. **[`walk()`](./api.md#walk)** streams that layout on a single forward cursor: one query for the whole tree, memory proportional to depth rather than tree size. Or **[a query](./sql.md)** answers the same question without building a Python object per node at all.
+
+The relayout has a second consequence worth knowing about: a directory's descendants end up as one contiguous id range, so "everything under this path" is a primary-key range scan rather than a recursive query.
 
 ## Honesty about the numbers
 
 There is a [Performance](./performance.md) page with measurements, and it is deliberate about what was and was not measured. The short version:
 
-- Against a warm `os.walk` on a local disk, cakewalk is about **6x** faster.
+- Against a warm `os.walk` on a local disk, `walk()` is about **6x** faster.
 - The contiguous-block layout accounts for about **2.5x** of that, consistently from 8.6k to 4.7M nodes.
+- Queries against the index are **19x to 895x** faster than `os.walk`, and `du()` is faster still, because they never build a Python object per node. This is the larger effect by a wide margin.
 - The layout's *real* benefit — turning scattered reads into one sequential pass — does not appear in any warm benchmark, and we have not measured it end to end on cold spinning media. It is a mechanism with measured seek counts behind it, not a benchmark result.
 
 ## Next
@@ -48,5 +63,6 @@ There is a [Performance](./performance.md) page with measurements, and it is del
 - [Getting started](./getting-started.md) — install and first walk
 - [Freshness](./freshness.md) — how stale the index is allowed to be, and what each mode catches
 - [Architecture](./architecture.md) — why the layout is shaped the way it is
+- [Querying the index](./sql.md) — the schema, subtree ranges, and why SQL beats walking
 - [API reference](./api.md)
 - [Limitations](./limitations.md) — read this before depending on it

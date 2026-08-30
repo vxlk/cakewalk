@@ -9,6 +9,7 @@ const sidebars = {
     'getting-started',
     'freshness',
     'architecture',
+    'sql',
     'api',
     'performance',
     'limitations',

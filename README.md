@@ -3,9 +3,11 @@
 [![Tests](https://github.com/vxlk/cakewalk/actions/workflows/test.yml/badge.svg)](https://github.com/vxlk/cakewalk/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**cakewalk** is a drop-in replacement for `os.walk` and `os.scandir` backed by a SQLite index of your filesystem. It is a native extension built with **Rust**, **PyO3**, **jwalk** and **SQLite**.
+**cakewalk** indexes a filesystem into SQLite and gives you two ways to read it back: a drop-in `os.walk` / `os.scandir`, and the database itself. It is a native extension built with **Rust**, **PyO3**, **jwalk** and **SQLite**.
 
-It is built for one job in particular: repeatedly walking a very large tree — a multi-terabyte shared drive, a network mount, a spinning disk — where the filesystem itself is the bottleneck. You sweep it once, then walk the index instead of the disk.
+It is built for one job in particular: repeatedly asking questions about a very large tree — a multi-terabyte shared drive, a network mount, a spinning disk — where the filesystem itself is the bottleneck. You sweep it once, then read the index instead of the disk.
+
+If you already have code written against `os.walk`, `cakewalk.walk` is a two-line change and about 6x faster. If you are willing to write a query instead, the same questions are answered **one to three orders of magnitude** faster than that — see [Query the index directly](#query-the-index-directly).
 
 📖 **[Full documentation](https://vxlk.github.io/cakewalk/)**
 
@@ -56,6 +58,94 @@ cakewalk.cache_info("D:\\share")
 
 Check `age_seconds` if you need to know how much you are trusting.
 
+## Query the index directly
+
+`walk()` is the compatibility layer. The index underneath it is an ordinary SQLite database with a documented schema, and for most questions that is the faster and simpler tool.
+
+The reason is structural. `walk()` has to build a Python string for every name in the tree — 5 million names is 5 million objects no matter how good the reader is. A query that ends in `sum()`, `count()` or `LIMIT 20` never builds them at all; SQLite answers inside C and hands back one row.
+
+```python
+import cakewalk
+
+conn = cakewalk.connect()                       # read-only, cannot corrupt the cache
+lo, hi = cakewalk.subtree_range("D:\\share")    # every descendant, as an id range
+
+conn.execute(
+    "SELECT sum(size), count(*) FROM fs_nodes "
+    "WHERE id BETWEEN ? AND ? AND is_dir = 0", (lo, hi)
+).fetchone()
+```
+
+### Why a range works
+
+The relayout that makes walking fast has a second consequence: **a directory's descendants occupy one contiguous run of row ids**. So "everything under this path" is `id BETWEEN ? AND ?` — a primary-key range scan, not a recursive CTE and not a join. `subtree_range()` hands you the two numbers.
+
+Rows store a `name`, not a path, so `path_of(id)` walks a row back up to an absolute path when you need one. Aggregates usually do not.
+
+### Schema
+
+| column | meaning |
+|---|---|
+| `id` | row id; dense, and the physical order of the table |
+| `parent_id` | `NULL` for a scanned root, whose `name` is its full path |
+| `name` | the entry's own name |
+| `is_dir` | 1 for directories |
+| `size` | files: bytes at scan time. directories: rolled-up subtree total |
+| `file_count`, `dir_count` | rolled-up descendant counts; 0 for files |
+| `last_modified` | mtime — whole seconds for directories, nanoseconds for files |
+| `node_hash` | xxHash64 Merkle digest, used by the scan to skip unchanged subtrees |
+| `child_start`, `child_end` | this directory's children, as a contiguous id range |
+| `subtree_last` | highest id in this subtree; with `child_start`, the descendant range |
+
+`scan_meta(root_id, scanned_at)` records when each root was last swept.
+
+Row ids are **not stable across scans** — any change to the tree triggers a relayout. Do not store them.
+
+### Recipes
+
+```sql
+-- the 20 largest files under a subtree
+SELECT id, name, size FROM fs_nodes
+WHERE id BETWEEN :lo AND :hi AND is_dir = 0
+ORDER BY size DESC LIMIT 20;
+
+-- where the space went: the heaviest immediate children of one directory
+SELECT name, size FROM fs_nodes
+WHERE id BETWEEN :child_start AND :child_end
+ORDER BY size DESC;
+
+-- count and bytes by extension
+SELECT lower(substr(name, instr(name, '.'))) AS ext, count(*), sum(size)
+FROM fs_nodes
+WHERE id BETWEEN :lo AND :hi AND is_dir = 0 AND name LIKE '%.%'
+GROUP BY ext ORDER BY 2 DESC;
+
+-- everything touched since a timestamp (file mtimes are nanoseconds)
+SELECT id FROM fs_nodes
+WHERE id BETWEEN :lo AND :hi AND is_dir = 0 AND last_modified > :ns;
+
+-- directories holding more than a gigabyte
+SELECT id, name, size FROM fs_nodes
+WHERE id BETWEEN :lo AND :hi AND is_dir = 1 AND size > 1073741824
+ORDER BY size DESC;
+```
+
+### What it is worth
+
+Measured on `%LOCALAPPDATA%\Programs` — 81,018 files, 11,346 directories, 4.11 GiB — warm page cache:
+
+| question | `os.walk` | `cakewalk.walk` | SQL | SQL vs `os.walk` |
+|---|---:|---:|---:|---:|
+| total size of the tree | 9715.1 ms | — | 10.9 ms | 895x |
+| every `*.dll` beneath it | 1480.9 ms | 321.7 ms | 21.9 ms | 68x |
+| 20 largest files | 10854.8 ms | — | 18.2 ms | 596x |
+| count and bytes by extension | 1586.4 ms | — | 85.6 ms | 19x |
+| total size, via `du()` rollup | 9715.1 ms | — | 0.03 ms | 325,000x |
+
+The `*.dll` row is the honest apples-to-apples one: no `stat()` calls on either side, just names. `cakewalk.walk` is 4.6x faster than `os.walk` there; the query is 68x. The gap is not query cleverness — it is that the walk materialises 92,365 Python strings and the query materialises one integer.
+
+`du()` is the extreme case, and the reason to reach for the rollups before writing anything: the answer was computed during the scan.
+
 ## Performance
 
 Measured on a 36,527-node tree, warm OS page cache, on the same machine:
@@ -71,6 +161,19 @@ The index costs about **76 bytes per node** — roughly 3.5 GiB for 50 million n
 Be aware of what these numbers are and are not. Every row above reads from RAM, so they measure query and CPU cost only; the block layout is worth about 2.5x there, consistently from 8.6k to 4.7M nodes. The reason the layout matters far more than that on a real shared drive is the seek behaviour, which does not show up in a warm benchmark at all: 0.112 backward page seeks per node becomes 0.000. On a 20M-node index that will not fit in RAM, that is the difference between millions of scattered reads and one sequential pass — but we have not measured that end to end on cold spinning media, and you should treat it as a mechanism, not a benchmark.
 
 `os.walk` in the table is also reading a warm page cache. Against a genuinely cold multi-terabyte share it is far slower than shown here, which is the case cakewalk exists for.
+
+### Where `walk()` spends its time
+
+Decomposed on a 4.7-million-node index, warm:
+
+| | time | share |
+|---|---:|---:|
+| SQLite engine | 1.5 ms | 0.0% |
+| `sqlite3` bridge — rows and columns crossing into Python | 6265.8 ms | 50.6% |
+| unpacking and the dir/file branch | 167.0 ms | 1.3% |
+| building lists, joining paths, yielding tuples | 5942.8 ms | 48.0% |
+
+The database is free. Essentially all of the time is spent turning rows into Python objects — which is why a query that avoids building them wins so heavily, and why [`du()`](#rollups) wins by five orders of magnitude.
 
 ## Caveats
 

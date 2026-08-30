@@ -1,7 +1,7 @@
 ---
 id: api
 title: API reference
-sidebar_position: 5
+sidebar_position: 6
 ---
 
 # API reference
@@ -77,6 +77,45 @@ cakewalk.cache_info(path)
 
 The rollups, plus `mtime` as recorded at scan time and how old the scan is. `scanned_at` is stamped only after the writer commits, so its presence guarantees the tree it describes is durable. Returns `None` if `path` is not indexed.
 
+## `connect`
+
+```python
+cakewalk.connect()
+```
+
+A read-only `sqlite3.Connection` to the index. Raises `FileNotFoundError` if nothing has been scanned yet.
+
+Read-only by URI, so a query cannot corrupt the cache or block a scan. See [Querying the index](./sql.md) for the schema and what it is worth.
+
+## `subtree_range`
+
+```python
+lo, hi = cakewalk.subtree_range(path)
+```
+
+The id range holding everything **beneath** `path`. Because the layout gives a directory's descendants one contiguous run of ids, a whole-subtree query is a primary-key range scan:
+
+```python
+conn.execute(
+    "SELECT sum(size) FROM fs_nodes WHERE id BETWEEN ? AND ? AND is_dir = 0",
+    (lo, hi),
+)
+```
+
+`path` itself is not in the range — its rollups are on its own row, which is what `du()` reads. An empty directory yields `(0, -1)`, which matches nothing.
+
+Returns `None` if `path` is not indexed, or if the index predates the block layout.
+
+## `path_of`
+
+```python
+cakewalk.path_of(node_id)
+```
+
+The absolute path for a row id, or `None`. Rows store a name rather than a path, so a query result is not usable as a path until it is joined back up the tree. Costs one lookup per level of depth.
+
+Row ids are **not stable across scans** — a change to the tree triggers a relayout that reassigns every id. Resolve to a path before storing anything.
+
 ## Validation constants
 
 ```python
@@ -108,13 +147,15 @@ from cakewalk import cakewalk as Cakewalk
 scanner = Cakewalk("/var/cache/index.db")
 ```
 
-Same surface as the module-level functions — `walk`, `scandir`, `du`, `cache_info` — against an index you choose. One index can hold many roots; scanning one leaves the others intact.
+Same surface as the module-level functions — `walk`, `scandir`, `du`, `cache_info`, `connect`, `subtree_range`, `path_of` — against an index you choose. One index can hold many roots; scanning one leaves the others intact.
 
 | method | notes |
 |---|---|
 | `start_scan(root=None, background=False)` | As `update_cache()` |
 | `walk(...)` | As `walk()`, but raises `FileNotFoundError` if the index file does not exist rather than falling back |
 | `scandir(path)` | Raises `FileNotFoundError` if `path` is not indexed |
+| `connect()` | As `connect()`, against this index |
+| `subtree_range(path)`, `path_of(id)` | As the module-level functions |
 | `close()` | Closes the connection |
 
 The module-level functions auto-recover from a corrupt index by deleting it; the class does not.

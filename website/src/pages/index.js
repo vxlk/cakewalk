@@ -13,7 +13,13 @@ const SAMPLE = `import cakewalk
 cakewalk.update_cache("D:\\\\share")     # sweep the filesystem once
 
 for root, dirs, files in cakewalk.walk("D:\\\\share"):
-    ...                                 # reads the index, not the disk`;
+    ...                                 # reads the index, not the disk
+
+# ...or ask the index directly, and skip building 5 million strings
+conn = cakewalk.connect()
+lo, hi = cakewalk.subtree_range("D:\\\\share")
+conn.execute("SELECT sum(size) FROM fs_nodes "
+             "WHERE id BETWEEN ? AND ? AND is_dir = 0", (lo, hi))`;
 
 function HomepageHeader() {
   const {siteConfig} = useDocusaurusContext();
@@ -37,8 +43,8 @@ function HomepageHeader() {
 export default function Home() {
   return (
     <Layout
-      title="A SQLite-backed os.walk"
-      description="Drop-in replacement for os.walk and os.scandir, backed by a SQLite index laid out for sequential reads.">
+      title="A filesystem index for Python"
+      description="A SQLite index of your filesystem: a drop-in os.walk, and a database you can query directly.">
       <HomepageHeader />
       <main>
         <section className="container margin-top--lg">
@@ -46,10 +52,20 @@ export default function Home() {
             <div className="col col--8 col--offset-2">
               <CodeBlock language="python">{SAMPLE}</CodeBlock>
               <p>
-                cakewalk exists for one situation: repeatedly walking a very
-                large tree — a multi-terabyte share, a network mount, a spinning
-                disk — where the filesystem itself is the bottleneck. Sweep it
-                once, then walk the index instead of the disk.
+                cakewalk exists for one situation: repeatedly asking questions
+                about a very large tree — a multi-terabyte share, a network
+                mount, a spinning disk — where the filesystem itself is the
+                bottleneck. Sweep it once, then read the index instead of the
+                disk.
+              </p>
+              <p>
+                <code>walk()</code> is the compatibility layer, and it is about
+                6x faster than <code>os.walk</code>. The index underneath it is
+                an ordinary SQLite database where a subtree is a contiguous id
+                range, and{' '}
+                <Link to="/docs/sql">querying it directly</Link> is 19x to 895x
+                faster — because an aggregate never builds a Python object per
+                file.
               </p>
               <p>
                 It is not magic, and the{' '}

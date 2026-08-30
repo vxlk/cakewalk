@@ -10,7 +10,7 @@ import {themes as prismThemes} from 'prism-react-renderer';
 /** @type {import('@docusaurus/types').Config} */
 const config = {
   title: 'cakewalk',
-  tagline: 'A SQLite-backed drop-in replacement for os.walk',
+  tagline: 'A filesystem index for Python, with an os.walk-compatible reader',
   favicon: 'img/favicon.ico',
 
   future: {
@@ -63,6 +63,7 @@ const config = {
             position: 'left',
             label: 'Docs',
           },
+          {to: '/docs/sql', label: 'SQL', position: 'left'},
           {to: '/docs/api', label: 'API', position: 'left'},
           {to: '/docs/performance', label: 'Performance', position: 'left'},
           {
@@ -81,6 +82,7 @@ const config = {
               {label: 'Getting started', to: '/docs/getting-started'},
               {label: 'Freshness', to: '/docs/freshness'},
               {label: 'Architecture', to: '/docs/architecture'},
+              {label: 'Querying the index', to: '/docs/sql'},
             ],
           },
           {

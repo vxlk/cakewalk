@@ -1,12 +1,18 @@
 ---
 id: performance
 title: Performance
-sidebar_position: 6
+sidebar_position: 7
 ---
 
 # Performance
 
 All figures below were measured on one Windows machine with a local SSD. They are here to be argued with, so each one says what it actually measured.
+
+## The headline is not `walk()`
+
+`walk()` is about 6x faster than `os.walk`. Queries against the same index are 19x to 895x faster, and `du()` is faster still. The rest of this page explains both, but if you only read one table, read [this one](./sql.md#why-the-query-wins-and-by-how-much).
+
+The asymmetry is structural. `walk()` must return a Python string for every name in the tree; a query that ends in `sum()` or `LIMIT 20` returns one row. See [Where the time goes](#where-the-time-goes) below — the database contributes essentially nothing to `walk()`'s cost, so no amount of query tuning will close that gap.
 
 ## Walk speed
 
@@ -83,6 +89,23 @@ Three things follow, and they drove the design:
 1. **SQLite's data access is free.** 8,169 rows scanned in 20 microseconds.
 2. **Query dispatch dominates.** A thousand-odd `execute()` calls cost ~34 ms while transferring *nothing*. This is why the reader issues one query for an entire walk.
 3. **Row transfer is real but is not interpreted Python.** It scales with column count and persists even when results are discarded in C — while building the same tuples from a list costs 1.11 ms. This is why the walk query carries four columns and not five.
+
+The same decomposition at 4,702,923 nodes, against the shipped reader:
+
+| | time | share |
+|---|---:|---:|
+| SQLite engine (`count(*)` over every row) | 1.5 ms | 0.0% |
+| `sqlite3` bridge — rows and columns crossing into Python | 6265.8 ms | 50.6% |
+| unpacking and the dir/file branch | 167.0 ms | 1.3% |
+| building lists, joining paths, yielding tuples | 5942.8 ms | 48.0% |
+| **total** | **12377.1 ms** | |
+
+Two consequences worth stating plainly:
+
+- **The database is not the bottleneck and never was.** 0.0% of a full walk. Optimising SQL further cannot help `walk()`.
+- **The cost is the Python objects themselves.** Producing 4.7M Python strings from data already in memory measures at ~450 ms on this machine, which is the floor any `os.walk`-shaped API has to pay. The shipped reader is roughly 27x above that floor, and most of the gap is the `sqlite3` module's per-row and per-column overhead — around 470 ns per row plus 215 ns per column value.
+
+That last number is the one to attack if `walk()` is to get materially faster, and it is not attackable from Python.
 
 ## Memory
 
