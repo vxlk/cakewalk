@@ -66,6 +66,41 @@ Check `age_seconds` if you need to know how much you are trusting.
 
 The reason is structural. `walk()` has to build a Python string for every name in the tree — 5 million names is 5 million objects no matter how good the reader is. A query that ends in `sum()`, `count()` or `LIMIT 20` never builds them at all; SQLite answers inside C and hands back one row.
 
+cakewalk provides a set of fast Python wrappers for the most common SQL queries via the `cakewalk.query` module, allowing you to bypass `walk()` for these questions without writing SQL yourself:
+
+```python
+from cakewalk import query
+
+# Find the 20 largest files in the subtree
+largest = query.largest_files("D:\\share", limit=20)
+
+# See where the space went in the immediate directory
+heaviest = query.heaviest_children("D:\\share")
+
+# Breakdown of files by extension (ext, count, total_size)
+extensions = query.by_extension("D:\\share")
+
+# Everything touched since a nanosecond timestamp
+recent = query.modified_since("D:\\share", timestamp_ns)
+
+# Directories larger than 1GB
+heavy_dirs = query.largest_dirs("D:\\share", min_size=1073741824)
+
+# Find all completely empty folders (no files or subdirectories)
+empty = query.empty_directories("D:\\share")
+
+# Directories containing the highest number of descendant files
+file_heavy = query.directories_with_most_files("D:\\share", limit=10)
+
+# Find the stalest/oldest untouched files for archiving
+stalest = query.oldest_files("D:\\share", limit=50)
+
+# Instant globbing via SQL LIKE pattern matching
+logs = query.find_by_pattern("D:\\share", "%.log")
+```
+
+If your question is not covered by the helpers, you can query the database directly.
+
 ```python
 import cakewalk
 
